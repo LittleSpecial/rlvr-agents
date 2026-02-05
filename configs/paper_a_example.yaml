@@ -1,0 +1,28 @@
+# Paper A 示例配置
+experiment_name: credit_assignment_baseline
+project: paper_a
+description: "反事实信用分配基线实验"
+
+# 模型
+model_name: Qwen2.5-7B
+use_lora: true
+lora_rank: 64
+
+# 训练
+algorithm: GRPO
+learning_rate: 1.0e-5
+batch_size: 32
+max_steps: 10000
+
+# 环境
+env_type: code
+max_trajectory_length: 20
+
+# Paper A 特定
+use_counterfactual_credit: true
+counterfactual_k: 4
+intervention_types:
+  - delete
+  - truncate
+
+seed: 42
