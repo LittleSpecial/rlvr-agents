@@ -15,15 +15,34 @@
 #   MODEL_PATH=... TRAIN_DATA=... EVAL_DATA=... sbatch scripts/slurm/run_paper_a_hf_1gpu.sh
 # ============================================================
 
-set -euo pipefail
+# Debug mode: show errors instead of silent fail
+set -x
+
+echo "=== Job started at $(date) ==="
+echo "Job ID: $SLURM_JOB_ID"
+echo "Node: $(hostname)"
+echo "PWD: $(pwd)"
+echo "SLURM_SUBMIT_DIR: ${SLURM_SUBMIT_DIR}"
 
 mkdir -p logs experiments
 cd "${SLURM_SUBMIT_DIR}"
 
+echo "=== Loading modules ==="
 module purge
-module load miniforge3/24.1
+module load miniforge3/24.1 || echo "Warning: miniforge3 module load failed"
+
+echo "=== Activating conda ==="
 eval "$(conda shell.bash hook)" 2>/dev/null || true
-conda activate rlvr || source activate rlvr
+conda activate rlvr || source activate rlvr || echo "Warning: conda activate failed"
+
+echo "=== Python info ==="
+which python3
+python3 --version
+
+echo "=== Environment variables ==="
+echo "MODEL_PATH=${MODEL_PATH:-NOT SET}"
+echo "TRAIN_DATA=${TRAIN_DATA:-NOT SET}"
+echo "EVAL_DATA=${EVAL_DATA:-NOT SET}"
 
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
