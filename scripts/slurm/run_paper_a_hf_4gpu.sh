@@ -50,6 +50,20 @@ fi
 
 module load compilers/gcc/9.3.0 2>/dev/null || true
 module load compilers/cuda/11.6 2>/dev/null || true
+# cuDNN is required by CUDA-enabled PyTorch wheels; auto-pick a cuda11.* variant if available.
+if command -v module >/dev/null 2>&1; then
+  if [ -n "${CUDNN_MODULE:-}" ]; then
+    module load "${CUDNN_MODULE}" 2>/dev/null || true
+  else
+    _CUDNN_CAND="$(module avail cudnn 2>&1 | grep -oE 'cudnn/[^[:space:]]+' | grep -E 'cuda11|cu11' | head -n 1)"
+    if [ -n "${_CUDNN_CAND}" ]; then
+      echo "Auto-loading ${_CUDNN_CAND}"
+      module load "${_CUDNN_CAND}" 2>/dev/null || true
+    else
+      echo "Warning: could not auto-detect a cuda11 cuDNN module (module avail cudnn)."
+    fi
+  fi
+fi
 eval "$(conda shell.bash hook)" 2>/dev/null || true
 conda activate rlvr || source activate rlvr
 
