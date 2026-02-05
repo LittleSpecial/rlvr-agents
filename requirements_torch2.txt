@@ -6,7 +6,10 @@ numpy>=1.24.0,<2.0
 pyyaml>=6.0
 
 # HF stack (torch>=2.2)
-torch>=2.2.0
+# IMPORTANT: do NOT install torch from PyPI on N32-H (aarch64).
+# Install the cluster-provided CUDA wheel first, e.g.:
+#   python -m pip install --force-reinstall /home/bingxing2/apps/package/pytorch/2.4.0+cu118_cp310/torch-*.whl
+# Then install the rest of the stack from this file.
 transformers>=4.41.0,<4.48.0
 peft>=0.11.0,<0.14.0
 datasets>=2.14.0,<3.0.0
@@ -14,4 +17,3 @@ datasets>=2.14.0,<3.0.0
 # Optional
 # accelerate>=0.30.0
 # trl>=0.9.0
-

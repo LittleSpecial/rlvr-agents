@@ -129,8 +129,11 @@ export PYTHONNOUSERSITE=1
 export TMPDIR=$HOME/tmp; mkdir -p $TMPDIR
 
 python -m pip uninstall -y torch torchvision torchaudio transformers peft datasets numpy
-python -m pip install --no-cache-dir --force-reinstall /home/bingxing2/apps/package/pytorch/2.4.0+cu118_cp310/*.whl
-python -m pip install --no-cache-dir --force-reinstall -r requirements_torch2.txt
+# 只装 torch wheel（torchvision/torchaudio 可不装，避免 torchvision::nms 之类的二进制不匹配问题）
+python -m pip install --no-cache-dir --force-reinstall /home/bingxing2/apps/package/pytorch/2.4.0+cu118_cp310/torch-*.whl
+# 装 HF 依赖（不要用 --ignore-installed，否则会从 PyPI 把 torch 换成别的版本）
+python -m pip install --no-cache-dir -r requirements_torch2.txt
+python -m pip install --no-cache-dir "numpy<2" pyyaml transformers==4.47.0 peft==0.13.2 datasets
 
 python scripts/slurm/1.py
 ```
@@ -162,6 +165,25 @@ EVAL_DATA=datasets/code/humaneval_test.jsonl \
 sbatch scripts/slurm/run_paper_a_hf_4gpu.sh
 
 # Paper A (HF backend, 单卡 debug)
+MODEL_PATH=/path/to/local/Qwen2.5-7B-Instruct \
+TRAIN_DATA=datasets/code/mbpp_train.jsonl \
+EVAL_DATA=datasets/code/humaneval_test.jsonl \
+sbatch scripts/slurm/run_paper_a_hf_1gpu.sh
+
+# Paper A: A0 vs A1 对照（验证 counterfactual credit 是否有效）
+# A1: 开启反事实 credit（默认就是开）
+USE_COUNTERFACTUAL_CREDIT=1 \
+MAX_STEPS=2000 \
+SAVE_INTERVAL=200 \
+MODEL_PATH=/path/to/local/Qwen2.5-7B-Instruct \
+TRAIN_DATA=datasets/code/mbpp_train.jsonl \
+EVAL_DATA=datasets/code/humaneval_test.jsonl \
+sbatch scripts/slurm/run_paper_a_hf_1gpu.sh
+
+# A0: 关闭反事实 credit（baseline）
+USE_COUNTERFACTUAL_CREDIT=0 \
+MAX_STEPS=2000 \
+SAVE_INTERVAL=200 \
 MODEL_PATH=/path/to/local/Qwen2.5-7B-Instruct \
 TRAIN_DATA=datasets/code/mbpp_train.jsonl \
 EVAL_DATA=datasets/code/humaneval_test.jsonl \

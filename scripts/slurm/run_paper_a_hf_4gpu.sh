@@ -165,28 +165,77 @@ echo "EVAL_DATA=${EVAL_DATA}"
 
 NUM_GPUS="${SLURM_GPUS_ON_NODE:-4}"
 
-"${PYTHON_BIN}" -m torch.distributed.run --standalone --nproc_per_node="${NUM_GPUS}" paper_a_credit_assignment/train.py \
-  --experiment_name "paper_a_hf_${SLURM_JOB_ID}" \
-  --backend hf \
-  --model_path "${MODEL_PATH}" \
-  --env_type code \
-  --no-show_tests \
-  --require_cuda \
-  --train_dataset "${TRAIN_DATA}" \
-  --eval_dataset "${EVAL_DATA}" \
-  --dtype bf16 \
-  --learning_rate 1e-5 \
-  --batch_size 2 \
-  --num_rollouts_per_prompt 2 \
-  --max_new_tokens 256 \
-  --max_prompt_tokens 1024 \
-  --max_steps 200 \
-  --log_interval 10 \
-  --eval_interval 50 \
-  --save_interval 200 \
-  --use_counterfactual_credit \
-  --counterfactual_k 2 \
-  --intervention_types delete truncate \
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-paper_a_hf_${SLURM_JOB_ID}}"
+ENV_TYPE="${ENV_TYPE:-code}"
+SHOW_TESTS="${SHOW_TESTS:-0}"  # 1=show tests, 0=hide tests
+DTYPE="${DTYPE:-bf16}"
+LEARNING_RATE="${LEARNING_RATE:-1e-5}"
+BATCH_SIZE="${BATCH_SIZE:-2}"
+NUM_ROLLOUTS_PER_PROMPT="${NUM_ROLLOUTS_PER_PROMPT:-2}"
+MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-256}"
+MAX_PROMPT_TOKENS="${MAX_PROMPT_TOKENS:-1024}"
+MAX_STEPS="${MAX_STEPS:-200}"
+LOG_INTERVAL="${LOG_INTERVAL:-10}"
+EVAL_INTERVAL="${EVAL_INTERVAL:-50}"
+SAVE_INTERVAL="${SAVE_INTERVAL:-200}"
+USE_COUNTERFACTUAL_CREDIT="${USE_COUNTERFACTUAL_CREDIT:-1}"  # 1=on, 0=off
+COUNTERFACTUAL_K="${COUNTERFACTUAL_K:-2}"
+INTERVENTION_TYPES="${INTERVENTION_TYPES:-delete truncate}"
+EXTRA_ARGS="${EXTRA_ARGS:-}"
+
+if [ "${SHOW_TESTS}" = "1" ]; then
+  SHOW_TESTS_FLAG="--show_tests"
+else
+  SHOW_TESTS_FLAG="--no-show_tests"
+fi
+
+if [ "${USE_COUNTERFACTUAL_CREDIT}" = "1" ]; then
+  CF_FLAG="--use_counterfactual_credit"
+else
+  CF_FLAG="--no-use_counterfactual_credit"
+fi
+
+echo "=== Paper A run config ==="
+echo "EXPERIMENT_NAME=${EXPERIMENT_NAME}"
+echo "ENV_TYPE=${ENV_TYPE} SHOW_TESTS=${SHOW_TESTS}"
+echo "DTYPE=${DTYPE} LR=${LEARNING_RATE}"
+echo "BATCH_SIZE=${BATCH_SIZE} NUM_ROLLOUTS_PER_PROMPT=${NUM_ROLLOUTS_PER_PROMPT}"
+echo "MAX_PROMPT_TOKENS=${MAX_PROMPT_TOKENS} MAX_NEW_TOKENS=${MAX_NEW_TOKENS}"
+echo "MAX_STEPS=${MAX_STEPS} LOG_INTERVAL=${LOG_INTERVAL} EVAL_INTERVAL=${EVAL_INTERVAL} SAVE_INTERVAL=${SAVE_INTERVAL}"
+echo "USE_COUNTERFACTUAL_CREDIT=${USE_COUNTERFACTUAL_CREDIT} COUNTERFACTUAL_K=${COUNTERFACTUAL_K} INTERVENTION_TYPES=${INTERVENTION_TYPES}"
+echo "EXTRA_ARGS=${EXTRA_ARGS}"
+
+PY_ARGS=(
+  paper_a_credit_assignment/train.py
+  --experiment_name "${EXPERIMENT_NAME}"
+  --backend hf
+  --model_path "${MODEL_PATH}"
+  --env_type "${ENV_TYPE}"
+  ${SHOW_TESTS_FLAG}
+  --require_cuda
+  --train_dataset "${TRAIN_DATA}"
+  --eval_dataset "${EVAL_DATA}"
+  --dtype "${DTYPE}"
+  --learning_rate "${LEARNING_RATE}"
+  --batch_size "${BATCH_SIZE}"
+  --num_rollouts_per_prompt "${NUM_ROLLOUTS_PER_PROMPT}"
+  --max_new_tokens "${MAX_NEW_TOKENS}"
+  --max_prompt_tokens "${MAX_PROMPT_TOKENS}"
+  --max_steps "${MAX_STEPS}"
+  --log_interval "${LOG_INTERVAL}"
+  --eval_interval "${EVAL_INTERVAL}"
+  --save_interval "${SAVE_INTERVAL}"
+  ${CF_FLAG}
+  --counterfactual_k "${COUNTERFACTUAL_K}"
+  --intervention_types ${INTERVENTION_TYPES}
   --output_dir ./experiments
+)
+
+if [ -n "${EXTRA_ARGS}" ]; then
+  # shellcheck disable=SC2206
+  PY_ARGS+=(${EXTRA_ARGS})
+fi
+
+"${PYTHON_BIN}" -m torch.distributed.run --standalone --nproc_per_node="${NUM_GPUS}" "${PY_ARGS[@]}"
 
 echo "=== Paper A HF done ==="
