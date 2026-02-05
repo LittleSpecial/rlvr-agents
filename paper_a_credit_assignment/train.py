@@ -31,6 +31,13 @@ from paper_a_credit_assignment import (
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Paper A: Counterfactual Credit Assignment")
+
+    # NOTE: We avoid argparse.BooleanOptionalAction for Python 3.8 compatibility on some clusters.
+    def add_bool_flag(name: str, *, default: bool, help: str):
+        dest = name.lstrip("-")
+        parser.add_argument(name, dest=dest, action="store_true", help=help)
+        parser.add_argument(f"--no-{dest}", dest=dest, action="store_false", help=argparse.SUPPRESS)
+        parser.set_defaults(**{dest: default})
     
     # 基本配置
     parser.add_argument("--experiment_name", type=str, default="credit_assignment")
@@ -43,7 +50,7 @@ def parse_args():
     parser.add_argument("--model_name", type=str, default="Qwen2.5-7B")
     parser.add_argument("--model_path", type=str, default=None,
                         help="(hf) local path or HF name; overrides --model_name")
-    parser.add_argument("--use_lora", action=argparse.BooleanOptionalAction, default=True)
+    add_bool_flag("--use_lora", default=True, help="(hf) enable LoRA adapters")
     parser.add_argument("--lora_rank", type=int, default=64)
     
     # 训练配置
@@ -61,20 +68,22 @@ def parse_args():
     parser.add_argument("--dtype", type=str, default="bf16", choices=["bf16", "fp16", "fp32"],
                         help="(hf) model dtype on GPU")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="(hf) gradient clipping")
-    parser.add_argument("--trust_remote_code", action=argparse.BooleanOptionalAction, default=False,
-                        help="(hf) set True for some community models")
-    parser.add_argument("--use_chat_template", action=argparse.BooleanOptionalAction, default=True,
-                        help="(hf) use tokenizer.apply_chat_template if available")
+    add_bool_flag("--trust_remote_code", default=False, help="(hf) set True for some community models")
+    add_bool_flag("--use_chat_template", default=True, help="(hf) use tokenizer.apply_chat_template if available")
     parser.add_argument("--system_prompt", type=str, default=None,
                         help="(hf) system prompt override (default is a code-only prompt)")
     parser.add_argument("--save_interval", type=int, default=500, help="(hf) save checkpoint every N steps")
     parser.add_argument("--eval_tasks", type=int, default=64, help="(hf) number of eval tasks per checkpoint")
+    add_bool_flag(
+        "--require_cuda",
+        default=True,
+        help="(hf) exit if CUDA is not available (prevents accidentally running a 7B model on CPU)",
+    )
     
     # 环境配置
     parser.add_argument("--env_type", type=str, default="code", choices=["code", "sql"])
     parser.add_argument("--max_trajectory_length", type=int, default=20)
-    parser.add_argument("--show_tests", action=argparse.BooleanOptionalAction, default=True,
-                        help="(code env) whether to show unit tests in the observation")
+    add_bool_flag("--show_tests", default=True, help="(code env) whether to show unit tests in the observation")
     parser.add_argument("--train_dataset", type=str, default=None,
                         help="(hf) JSONL dataset path for training (CodeEnv schema)")
     parser.add_argument("--eval_dataset", type=str, default=None,
@@ -83,13 +92,12 @@ def parse_args():
     parser.add_argument("--max_eval_samples", type=int, default=None, help="(hf) cap eval dataset size")
 
     # Paper A 特定配置
-    parser.add_argument("--use_counterfactual_credit", action=argparse.BooleanOptionalAction, default=True)
+    add_bool_flag("--use_counterfactual_credit", default=True, help="enable counterfactual credit reweighting")
     parser.add_argument("--counterfactual_k", type=int, default=4)
     parser.add_argument("--intervention_types", nargs="+", default=["delete", "truncate"])
     parser.add_argument("--credit_normalization", type=str, default="signed",
                         choices=["signed", "minmax", "zscore", "softmax", "none"])
-    parser.add_argument("--log_agop", action=argparse.BooleanOptionalAction, default=True,
-                        help="Log AGOP (Average Gradient Outer Product) stats on toy policy gradients.")
+    add_bool_flag("--log_agop", default=True, help="Log AGOP (Average Gradient Outer Product) stats on toy policy gradients.")
     parser.add_argument("--agop_power_iters", type=int, default=30,
                         help="Power-iteration steps for estimating top AGOP eigenvalue.")
     
@@ -376,9 +384,27 @@ def run_hf(args, config: ExperimentConfig) -> None:
     from shared.hf.distributed import barrier
 
     dist_info: DistInfo = init_distributed()
-    device = torch.device(
-        f"cuda:{dist_info.local_rank}" if torch.cuda.is_available() else "cpu"
-    )
+    has_cuda = torch.cuda.is_available()
+    if args.require_cuda and not has_cuda:
+        if dist_info.is_rank0:
+            print(
+                "\n[ERROR] CUDA is not available in this environment.\n"
+                "This run is configured with --require_cuda to prevent accidental CPU training.\n"
+                "On BSCC N32-H (aarch64), you typically need the cluster-provided CUDA PyTorch wheel + env.sh.\n",
+                flush=True,
+            )
+            print(f"torch.__version__={torch.__version__} torch.version.cuda={torch.version.cuda}", flush=True)
+        raise SystemExit(2)
+
+    if has_cuda and dist_info.local_rank >= torch.cuda.device_count():
+        raise SystemExit(
+            f"[ERROR] local_rank={dist_info.local_rank} but visible CUDA devices={torch.cuda.device_count()}."
+        )
+
+    if has_cuda:
+        torch.cuda.set_device(dist_info.local_rank)
+
+    device = torch.device(f"cuda:{dist_info.local_rank}" if has_cuda else "cpu")
 
     if args.train_dataset is None:
         raise ValueError("--train_dataset is required for --backend hf")
@@ -447,8 +473,12 @@ def run_hf(args, config: ExperimentConfig) -> None:
 
     # Model / tokenizer
     model_name_or_path = args.model_path or args.model_name
+    if dist_info.is_rank0:
+        print("Loading tokenizer...", flush=True)
     tokenizer = AutoTokenizer.from_pretrained(
-        model_name_or_path, trust_remote_code=args.trust_remote_code
+        model_name_or_path,
+        trust_remote_code=args.trust_remote_code,
+        padding_side="left",  # Required for decoder-only generation
     )
     added_pad = False
     if tokenizer.pad_token is None:
@@ -460,10 +490,13 @@ def run_hf(args, config: ExperimentConfig) -> None:
         "fp16": torch.float16,
         "fp32": torch.float32,
     }[args.dtype]
+    if dist_info.is_rank0:
+        print(f"Loading model to {device} with dtype={dtype}...", flush=True)
     model = AutoModelForCausalLM.from_pretrained(
         model_name_or_path,
         trust_remote_code=args.trust_remote_code,
-        torch_dtype=dtype if device.type == "cuda" else None,
+        torch_dtype=dtype,
+        device_map={"":  device} if device.type == "cuda" else None,  # Direct GPU load
     )
     if added_pad:
         model.resize_token_embeddings(len(tokenizer))
@@ -482,7 +515,9 @@ def run_hf(args, config: ExperimentConfig) -> None:
         if dist_info.is_rank0 and hasattr(model, "print_trainable_parameters"):
             model.print_trainable_parameters()
 
-    model.to(device)
+    if dist_info.is_rank0:
+        print("Model loaded. Applying LoRA if enabled...", flush=True)
+    # model.to(device) - removed, using device_map above
 
     if dist_info.distributed:
         model = torch.nn.parallel.DistributedDataParallel(

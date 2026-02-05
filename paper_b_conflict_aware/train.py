@@ -24,6 +24,13 @@ from shared.toy import ToyCategoricalPolicy, get_toy_tasks, compute_conflict_met
 def parse_args():
     parser = argparse.ArgumentParser(description="Paper B: Interference-aware RLVR (toy backend)")
 
+    # NOTE: We avoid argparse.BooleanOptionalAction for Python 3.8 compatibility on some clusters.
+    def add_bool_flag(name: str, *, default: bool, help: str):
+        dest = name.lstrip("-")
+        parser.add_argument(name, dest=dest, action="store_true", help=help)
+        parser.add_argument(f"--no-{dest}", dest=dest, action="store_false", help=argparse.SUPPRESS)
+        parser.set_defaults(**{dest: default})
+
     # 基本配置
     parser.add_argument("--experiment_name", type=str, default="interference_aware")
     parser.add_argument("--description", type=str, default="")
@@ -33,7 +40,7 @@ def parse_args():
 
     # 模型配置
     parser.add_argument("--model_name", type=str, default="Qwen2.5-7B")
-    parser.add_argument("--use_lora", action=argparse.BooleanOptionalAction, default=True)
+    add_bool_flag("--use_lora", default=True, help="(hf) enable LoRA adapters")
     parser.add_argument("--lora_rank", type=int, default=64)
 
     # 训练配置
@@ -48,8 +55,7 @@ def parse_args():
 
     # 环境配置
     parser.add_argument("--env_type", type=str, default="code", choices=["code", "sql"])
-    parser.add_argument("--show_tests", action=argparse.BooleanOptionalAction, default=True,
-                        help="(code env) whether to show unit tests in the observation")
+    add_bool_flag("--show_tests", default=True, help="(code env) whether to show unit tests in the observation")
 
     # Multi-skill protocols
     parser.add_argument("--protocol", type=str, default="mixed", choices=["mixed", "sequential"])
@@ -64,8 +70,7 @@ def parse_args():
     parser.add_argument("--epsilon", type=float, default=0.0, help="Constraint slack: dot(g_s, Δθ) >= -epsilon")
     parser.add_argument("--memory_per_protected", type=int, default=8,
                         help="(sequential) prompts sampled per protected skill per step to estimate constraint grads")
-    parser.add_argument("--normalize_update", action=argparse.BooleanOptionalAction, default=True,
-                        help="Normalize projected update to match candidate gradient norm")
+    add_bool_flag("--normalize_update", default=True, help="Normalize projected update to match candidate gradient norm")
 
     # Interference stats (analysis only)
     parser.add_argument("--conflict_threshold", type=float, default=0.0,

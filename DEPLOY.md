@@ -26,6 +26,38 @@ bash setup_cluster.sh
 python3 -c "import sys; print(sys.version)"
 ```
 
+## N32-H (aarch64) 的 PyTorch 注意事项（你现在卡住的点）
+
+你在计算节点里看到：
+
+- `nvidia-smi` 有 GPU
+- 但 `torch.cuda.is_available()` 是 `False`
+
+这几乎总是因为 **装成了 CPU-only 的 PyTorch**（aarch64 上从官方源装 CUDA wheel 经常不匹配）。
+
+按手册的做法：安装超算提供的 CUDA PyTorch wheel，并在作业里 `source env.sh`。
+
+在集群上常见目录：
+
+```bash
+ls /home/bingxing2/apps/package/pytorch
+ls /home/bingxing2/apps/package/pytorch/*/*.whl
+cat /home/bingxing2/apps/package/pytorch/*/env.sh
+```
+
+手册示例（你截图里的那段）：
+
+```bash
+pip install /home/bingxing2/apps/package/pytorch/1.11.0+cu113_cp38/*.whl
+source /home/bingxing2/apps/package/pytorch/1.11.0+cu113_cp38/env.sh
+```
+
+然后用一个最小 Slurm 作业在“有 GPU 的计算节点”上验证：
+
+```bash
+sbatch scripts/slurm/setup_env.sh
+```
+
 ## 运行训练
 
 ```bash

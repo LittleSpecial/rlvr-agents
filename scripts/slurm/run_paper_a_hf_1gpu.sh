@@ -15,9 +15,6 @@
 #   MODEL_PATH=... TRAIN_DATA=... EVAL_DATA=... sbatch scripts/slurm/run_paper_a_hf_1gpu.sh
 # ============================================================
 
-# Debug mode: show errors instead of silent fail
-set -x
-
 echo "=== Job started at $(date) ==="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $(hostname)"
@@ -31,6 +28,21 @@ echo "=== Loading modules ==="
 module purge
 module load miniforge3/24.1 || echo "Warning: miniforge3 module load failed"
 
+# N32-H 手册：CUDA/GCC 模块一般在 compilers/* 下（不要用 cuda/11.x 这种名字）
+# 如果你安装了超算提供的 PyTorch wheel，可以直接 source 它的 env.sh（里面会 module load）
+PYTORCH_ENV_SH="${PYTORCH_ENV_SH:-/home/bingxing2/apps/package/pytorch/1.11.0+cu113_cp38/env.sh}"
+if [ -f "${PYTORCH_ENV_SH}" ]; then
+  echo "Sourcing PYTORCH_ENV_SH=${PYTORCH_ENV_SH}"
+  # shellcheck disable=SC1090
+  source "${PYTORCH_ENV_SH}"
+else
+  module load compilers/gcc/9.3.0 2>/dev/null || true
+  module load compilers/cuda/11.3 2>/dev/null || true
+fi
+
+echo "=== CUDA check ==="
+nvidia-smi || echo "Warning: nvidia-smi failed"
+
 echo "=== Activating conda ==="
 eval "$(conda shell.bash hook)" 2>/dev/null || true
 conda activate rlvr || source activate rlvr || echo "Warning: conda activate failed"
@@ -38,6 +50,24 @@ conda activate rlvr || source activate rlvr || echo "Warning: conda activate fai
 echo "=== Python info ==="
 which python3
 python3 --version
+
+echo "=== Torch CUDA check (fail-fast) ==="
+python3 - <<'PY'
+import torch
+print("torch:", torch.__version__)
+print("torch.version.cuda:", torch.version.cuda)
+print("cuda.is_available:", torch.cuda.is_available())
+print("device_count:", torch.cuda.device_count())
+if not torch.cuda.is_available():
+    raise SystemExit(
+        "\n[ERROR] torch.cuda.is_available() == False\n"
+        "This usually means you installed a CPU-only PyTorch build on N32-H (aarch64).\n"
+        "Fix: install the cluster-provided CUDA PyTorch wheel and source its env.sh, e.g. (per manual):\n"
+        "  pip install /home/bingxing2/apps/package/pytorch/<...>/*.whl\n"
+        "  source /home/bingxing2/apps/package/pytorch/<...>/env.sh\n"
+        "Then re-submit the job.\n"
+    )
+PY
 
 echo "=== Environment variables ==="
 echo "MODEL_PATH=${MODEL_PATH:-NOT SET}"
@@ -58,6 +88,7 @@ python3 paper_a_credit_assignment/train.py \
   --model_path "${MODEL_PATH}" \
   --env_type code \
   --no-show_tests \
+  --require_cuda \
   --train_dataset "${TRAIN_DATA}" \
   --eval_dataset "${EVAL_DATA}" \
   --dtype bf16 \
@@ -76,4 +107,3 @@ python3 paper_a_credit_assignment/train.py \
   --output_dir ./experiments
 
 echo "=== Paper A HF (1GPU) done ==="
-

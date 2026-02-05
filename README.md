@@ -39,7 +39,7 @@ neurips2026_plans/
 
 ```bash
 # Toy backend（可本地跑通闭环，无重依赖）
-# 仅需 Python 3.10+
+# 仅需 Python 3.8+
 
 # Real LLM 训练（HF Transformers + LoRA）
 python3 -m pip install -r requirements.txt

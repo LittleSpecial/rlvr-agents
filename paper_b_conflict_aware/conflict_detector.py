@@ -62,37 +62,52 @@ class ConflictDetector:
         """
         计算每个组的梯度
         """
-        group_gradients = {}
-        
+        # Pre-select parameters once to avoid iterating model.named_parameters() for every group.
+        tracked: List[Tuple[str, nn.Parameter]] = []
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if include_param_names is not None and not any(s in name for s in include_param_names):
+                continue
+            if param_filter is not None and not param_filter(name, param):
+                continue
+            tracked.append((name, param))
+
+        params = [p for _, p in tracked]
         group_ids = sorted(group_losses.keys())
-        for idx, group_id in enumerate(group_ids):
-            loss = group_losses[group_id]
-            # 清空梯度
-            model.zero_grad()
-            
-            # 反向传播
-            # Only retain graph when we still need it for subsequent groups.
+
+        group_gradients: Dict[int, torch.Tensor] = {}
+        if not params:
+            # Nothing to track; return dummy vectors on the same device as losses.
+            device = next(iter(group_losses.values())).device
+            for gid in group_ids:
+                group_gradients[gid] = torch.zeros(1, device=device)
+            return group_gradients
+
+        # Use torch.autograd.grad to avoid populating param.grad and to reduce retain_graph overhead.
+        for idx, gid in enumerate(group_ids):
+            loss = group_losses[gid]
             retain = idx != (len(group_ids) - 1)
-            loss.backward(retain_graph=retain)
-            
-            # 收集梯度
-            grads = []
-            for name, param in model.named_parameters():
-                if not param.requires_grad:
+            grads = torch.autograd.grad(
+                loss,
+                params,
+                retain_graph=retain,
+                create_graph=False,
+                allow_unused=True,
+            )
+
+            flat: List[torch.Tensor] = []
+            for g in grads:
+                if g is None:
                     continue
-                if include_param_names is not None and not any(s in name for s in include_param_names):
-                    continue
-                if param_filter is not None and not param_filter(name, param):
-                    continue
-                if param.grad is not None:
-                    grads.append(param.grad.detach().view(-1).clone())
-            
-            if grads:
-                group_gradients[group_id] = torch.cat(grads)
+                flat.append(g.detach().reshape(-1))
+
+            if flat:
+                # Cast to float32 for stable cosine similarity / norms.
+                group_gradients[gid] = torch.cat(flat).float()
             else:
-                group_gradients[group_id] = torch.zeros(1, device=loss.device)
-        
-        model.zero_grad()
+                group_gradients[gid] = torch.zeros(1, device=loss.device)
+
         return group_gradients
     
     def detect_conflicts(

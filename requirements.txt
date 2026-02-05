@@ -1,12 +1,12 @@
 # RLVR Agents - Requirements
-# Python >= 3.10
+# Python >= 3.8 (some clusters only provide cp38 CUDA PyTorch wheels)
 
 # Core (always needed)
 numpy>=1.24.0
 pyyaml>=6.0
 
 # For real LLM training (HF backend)
-torch>=2.0.0
+torch>=1.11.0
 transformers>=4.36.0
 accelerate>=0.25.0
 peft>=0.7.0  # LoRA

@@ -32,6 +32,16 @@ cd "${SLURM_SUBMIT_DIR}"
 
 module purge
 module load miniforge3/24.1
+# N32-H 手册：CUDA/GCC 模块一般在 compilers/* 下；或直接 source 超算提供的 PyTorch env.sh
+PYTORCH_ENV_SH="${PYTORCH_ENV_SH:-/home/bingxing2/apps/package/pytorch/1.11.0+cu113_cp38/env.sh}"
+if [ -f "${PYTORCH_ENV_SH}" ]; then
+  echo "Sourcing PYTORCH_ENV_SH=${PYTORCH_ENV_SH}"
+  # shellcheck disable=SC1090
+  source "${PYTORCH_ENV_SH}"
+else
+  module load compilers/gcc/9.3.0 2>/dev/null || true
+  module load compilers/cuda/11.3 2>/dev/null || true
+fi
 eval "$(conda shell.bash hook)" 2>/dev/null || true
 conda activate rlvr || source activate rlvr
 
@@ -50,6 +60,20 @@ echo "GPUs: ${CUDA_VISIBLE_DEVICES:-N/A}"
 echo "Python: $(which python3)"
 echo "=========================================="
 
+# fail-fast：避免“申请了 4 卡但 torch 只能 CPU 跑”的浪费
+python3 - <<'PY'
+import torch
+print("torch:", torch.__version__)
+print("torch.version.cuda:", torch.version.cuda)
+print("cuda.is_available:", torch.cuda.is_available())
+print("device_count:", torch.cuda.device_count())
+if not torch.cuda.is_available():
+    raise SystemExit(
+        "\n[ERROR] torch.cuda.is_available() == False\n"
+        "You are likely using a CPU-only PyTorch build. Install the cluster-provided CUDA wheel + source env.sh.\n"
+    )
+PY
+
 # 你需要把模型与数据放在计算节点可见的路径上
 MODEL_PATH="${MODEL_PATH:-/path/to/local/Qwen2.5-7B-Instruct}"
 TRAIN_DATA="${TRAIN_DATA:-datasets/code/mbpp_train.jsonl}"
@@ -67,6 +91,7 @@ torchrun --standalone --nproc_per_node="${NUM_GPUS}" paper_a_credit_assignment/t
   --model_path "${MODEL_PATH}" \
   --env_type code \
   --no-show_tests \
+  --require_cuda \
   --train_dataset "${TRAIN_DATA}" \
   --eval_dataset "${EVAL_DATA}" \
   --dtype bf16 \
@@ -85,4 +110,3 @@ torchrun --standalone --nproc_per_node="${NUM_GPUS}" paper_a_credit_assignment/t
   --output_dir ./experiments
 
 echo "=== Paper A HF done ==="
-
