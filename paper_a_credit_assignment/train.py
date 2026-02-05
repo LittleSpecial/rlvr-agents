@@ -536,6 +536,18 @@ def run_hf(args, config: ExperimentConfig) -> None:
         raw_model.config.use_cache = False
     if args.gradient_checkpointing and hasattr(raw_model, "gradient_checkpointing_enable"):
         raw_model.gradient_checkpointing_enable()
+        # With LoRA/frozen embeddings, checkpointed blocks may receive inputs without requires_grad.
+        # HF/PEFT training typically calls enable_input_require_grads() to allow gradients to flow.
+        if hasattr(model, "enable_input_require_grads"):
+            try:
+                model.enable_input_require_grads()
+            except Exception:
+                pass
+        if hasattr(raw_model, "enable_input_require_grads"):
+            try:
+                raw_model.enable_input_require_grads()
+            except Exception:
+                pass
 
     if dist_info.distributed:
         model = torch.nn.parallel.DistributedDataParallel(
@@ -630,10 +642,11 @@ def run_hf(args, config: ExperimentConfig) -> None:
 
             env.reset(task)
             if args.env_type == "code":
-                env.step(Action(ActionType.CODE_WRITE, content))
+                # Mark this as the stochastic policy action for step-level credit assignment.
+                env.step(Action(ActionType.CODE_WRITE, content, metadata={"logprob": 0.0}))
                 env.step(Action(ActionType.TOOL_CALL, "", tool_name="run_tests"))
             else:
-                env.step(Action(ActionType.TOOL_CALL, content, tool_name="submit_query"))
+                env.step(Action(ActionType.TOOL_CALL, content, tool_name="submit_query", metadata={"logprob": 0.0}))
             trajectories.append(env.get_trajectory())
 
         # 4) GRPO-style advantages + optional counterfactual reweighting

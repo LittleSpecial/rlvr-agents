@@ -142,7 +142,8 @@ def weighted_rl_loss(
         # Free per-microbatch activations ASAP.
         del out
 
-    loss = (loss_sum / float(bsz)).to(sequences.dtype)
+    # Keep loss as floating point (do NOT cast to sequences.dtype which is typically int64 token ids).
+    loss = loss_sum / float(bsz)
     metrics = {
         "mean_nll": float((nll_mean_sum / float(bsz)).item()),
         "mean_weight": float((w_sum / float(bsz)).item()),
