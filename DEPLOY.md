@@ -81,6 +81,70 @@ PYTORCH_ENV_SH=/nonexistent sbatch scripts/slurm/setup_env.sh
 sbatch scripts/slurm/setup_env.sh
 ```
 
+## transformers/peft 版本不匹配（你现在遇到的报错）
+
+如果你看到类似报错：
+
+- `Disabling PyTorch because PyTorch >= 2.2 is required but found 1.13.1+cu116`
+- `AutoModelForCausalLM requires the PyTorch library but it was not found`
+- `A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x`
+
+原因通常是：
+
+- 你的 `~/.local`（用户目录）里装了“过新”的 `transformers/peft`，它们会要求 `torch>=2.2`；
+- 你当前环境里是 `torch 1.13.*`，或混装导致 `transformers` 找不到 torch；
+- 你的 `numpy==2.x` 和部分二进制包（torch/扩展）不兼容。
+
+解决原则：
+
+- **不要混用 `~/.local`**：跑作业时设置 `PYTHONNOUSERSITE=1`（我们已在 slurm 脚本里加了）。
+- 在 **conda 环境里**把 `numpy/transformers/peft` 统一到兼容组合。
+
+### 方案 A（更稳）：torch 1.13.1+cu116 + 旧版 transformers/peft
+
+在登录节点执行：
+
+```bash
+module purge
+module load miniforge3/24.1
+source activate $HOME/.conda/envs/rlvr
+
+export PYTHONNOUSERSITE=1
+export TMPDIR=$HOME/tmp; mkdir -p $TMPDIR
+
+python -m pip install --no-cache-dir --force-reinstall -r requirements.txt
+python scripts/slurm/1.py
+```
+
+### 方案 B（更省心贴合新版 HF）：torch 2.4.0+cu118（推荐你现在用）
+
+在登录节点执行：
+
+```bash
+module purge
+module load miniforge3/24.1
+source activate $HOME/.conda/envs/rlvr
+
+export PYTHONNOUSERSITE=1
+export TMPDIR=$HOME/tmp; mkdir -p $TMPDIR
+
+python -m pip uninstall -y torch torchvision torchaudio transformers peft datasets numpy
+python -m pip install --no-cache-dir --force-reinstall /home/bingxing2/apps/package/pytorch/2.4.0+cu118_cp310/*.whl
+python -m pip install --no-cache-dir --force-reinstall -r requirements_torch2.txt
+
+python scripts/slurm/1.py
+```
+
+然后提交作业时显式指定模块版本（cu118 对齐 cuda11.8 + nccl11.8）：
+
+```bash
+CUDA_MODULE=compilers/cuda/11.8 \
+GCC_MODULE=compilers/gcc/11.3.0 \
+NCCL_MODULE=nccl/2.11.4-1_cuda11.8 \
+CUDNN_MODULE=cudnn/8.6.0.163_cuda11.x \
+sbatch scripts/slurm/run_paper_a_hf_1gpu.sh
+```
+
 ## 运行训练
 
 ```bash

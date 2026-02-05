@@ -1,0 +1,17 @@
+# RLVR Agents - Requirements (Torch 2.x stack)
+# For BSCC N32-H, prefer the cluster-provided PyTorch CUDA wheels.
+
+# Core
+numpy>=1.24.0,<2.0
+pyyaml>=6.0
+
+# HF stack (torch>=2.2)
+torch>=2.2.0
+transformers>=4.41.0,<4.48.0
+peft>=0.11.0,<0.14.0
+datasets>=2.14.0,<3.0.0
+
+# Optional
+# accelerate>=0.30.0
+# trl>=0.9.0
+
