@@ -46,9 +46,11 @@ if command -v module >/dev/null 2>&1; then
   if [ -n "${CUDNN_MODULE:-}" ]; then
     module load "${CUDNN_MODULE}" 2>/dev/null || true
   else
-    _CUDNN_CAND="$(module avail cudnn 2>&1 | grep -oE 'cudnn/[^[:space:]]+' | grep -E 'cuda11\\.x|cu11' | head -n 1)"
+    _CUDNN_LIST="$(module avail cudnn 2>&1 || true)"
+    _CUDNN_LIST="$(echo "${_CUDNN_LIST}" | grep -oE 'cudnn/[^[:space:]]+' || true)"
+    _CUDNN_CAND="$(echo "${_CUDNN_LIST}" | grep -E 'cuda11\\.x|cu11' | sort -V | tail -n 1)"
     if [ -z "${_CUDNN_CAND}" ]; then
-      _CUDNN_CAND="$(module avail cudnn 2>&1 | grep -oE 'cudnn/[^[:space:]]+' | grep -E 'cuda11|cu11' | head -n 1)"
+      _CUDNN_CAND="$(echo "${_CUDNN_LIST}" | grep -E 'cuda11|cu11' | sort -V | tail -n 1)"
     fi
     if [ -n "${_CUDNN_CAND}" ]; then
       echo "Auto-loading ${_CUDNN_CAND}"
@@ -62,16 +64,21 @@ fi
 echo "=== CUDA check ==="
 nvidia-smi || echo "Warning: nvidia-smi failed"
 
-echo "=== Activating conda ==="
-eval "$(conda shell.bash hook)" 2>/dev/null || true
-conda activate rlvr || source activate rlvr || echo "Warning: conda activate failed"
+echo "=== Python selection ==="
+PYTHON_BIN="${PYTHON_BIN:-$HOME/.conda/envs/rlvr/bin/python3}"
+if [ -x "${PYTHON_BIN}" ]; then
+  echo "Using PYTHON_BIN=${PYTHON_BIN}"
+else
+  echo "Warning: ${PYTHON_BIN} not found; falling back to PATH python3"
+  PYTHON_BIN="$(command -v python3 || true)"
+fi
 
 echo "=== Python info ==="
-which python3
-python3 --version
+echo "PYTHON_BIN=${PYTHON_BIN}"
+"${PYTHON_BIN}" --version
 
 echo "=== Torch CUDA check (fail-fast) ==="
-python3 - <<'PY'
+"${PYTHON_BIN}" - <<'PY'
 import torch
 print("torch:", torch.__version__)
 print("torch.version.cuda:", torch.version.cuda)
@@ -101,7 +108,7 @@ MODEL_PATH="${MODEL_PATH:-/path/to/local/Qwen2.5-7B-Instruct}"
 TRAIN_DATA="${TRAIN_DATA:-datasets/code/mbpp_train.jsonl}"
 EVAL_DATA="${EVAL_DATA:-datasets/code/humaneval_test.jsonl}"
 
-python3 paper_a_credit_assignment/train.py \
+"${PYTHON_BIN}" paper_a_credit_assignment/train.py \
   --experiment_name "paper_a_hf_${SLURM_JOB_ID}" \
   --backend hf \
   --model_path "${MODEL_PATH}" \

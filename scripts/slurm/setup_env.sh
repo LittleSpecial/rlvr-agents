@@ -19,6 +19,7 @@
 # ============================================================
 
 set -euo pipefail
+trap 'rc=$?; echo "[ERR] setup_env.sh failed at line ${LINENO} (rc=${rc})" >&2' ERR
 echo "=== RLVR Environment Setup ==="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $SLURMD_NODENAME"
@@ -52,9 +53,13 @@ if command -v module >/dev/null 2>&1; then
   if [ -n "${CUDNN_MODULE:-}" ]; then
     module load "${CUDNN_MODULE}" 2>/dev/null || true
   else
-    _CUDNN_CAND="$(module avail cudnn 2>&1 | grep -oE 'cudnn/[^[:space:]]+' | grep -E 'cuda11\\.x|cu11' | head -n 1)"
+    # Some module systems return exit code 1 for "avail"; avoid set -e killing the job.
+    _CUDNN_LIST="$(module avail cudnn 2>&1 || true)"
+    _CUDNN_LIST="$(echo "${_CUDNN_LIST}" | grep -oE 'cudnn/[^[:space:]]+' || true)"
+    # Prefer cuda11.x builds (newer/more compatible) and pick the highest version.
+    _CUDNN_CAND="$(echo "${_CUDNN_LIST}" | grep -E 'cuda11\\.x|cu11' | sort -V | tail -n 1)"
     if [ -z "${_CUDNN_CAND}" ]; then
-      _CUDNN_CAND="$(module avail cudnn 2>&1 | grep -oE 'cudnn/[^[:space:]]+' | grep -E 'cuda11|cu11' | head -n 1)"
+      _CUDNN_CAND="$(echo "${_CUDNN_LIST}" | grep -E 'cuda11|cu11' | sort -V | tail -n 1)"
     fi
     if [ -n "${_CUDNN_CAND}" ]; then
       echo "Auto-loading ${_CUDNN_CAND}"
@@ -65,14 +70,28 @@ if command -v module >/dev/null 2>&1; then
   fi
 fi
 
-eval "$(conda shell.bash hook)" 2>/dev/null || true
-conda activate rlvr 2>/dev/null || source activate rlvr 2>/dev/null || true
+echo "=== Module list ==="
+module list 2>&1 || true
+
+echo "=== Python selection ==="
+# Prefer a fixed interpreter path to avoid conda activation issues in batch jobs.
+PYTHON_BIN="${PYTHON_BIN:-$HOME/.conda/envs/rlvr/bin/python3}"
+if [ -x "${PYTHON_BIN}" ]; then
+  echo "Using PYTHON_BIN=${PYTHON_BIN}"
+else
+  echo "Warning: ${PYTHON_BIN} not found; falling back to PATH python3"
+  PYTHON_BIN="$(command -v python3 || true)"
+fi
+
+echo "=== Python path ==="
+echo "PYTHON_BIN=${PYTHON_BIN}"
+"${PYTHON_BIN}" -V || true
 
 echo "=== nvidia-smi ==="
 nvidia-smi || true
 
 echo "=== Python / Torch check ==="
-python3 - <<'PY'
+"${PYTHON_BIN}" - <<'PY'
 import torch
 print("torch:", torch.__version__)
 print("torch.version.cuda:", torch.version.cuda)
