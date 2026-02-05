@@ -7,10 +7,15 @@
 #SBATCH --output=logs/job_%j.out    # 标准输出日志
 #SBATCH --error=logs/job_%j.err     # 错误日志
 
+# 注意：Slurm 不会自动创建目录；提交前请先在登录节点执行 `mkdir -p logs`
+
 # === 环境加载 ===
+set -e
+module purge
 module load miniforge3/24.1
 # 如果需要特定CUDA版本: module load compilers/cuda/11.6
-conda activate rlvr
+eval "$(conda shell.bash hook)" 2>/dev/null || true
+conda activate rlvr || source activate rlvr
 
 # 调试信息
 echo "=========================================="

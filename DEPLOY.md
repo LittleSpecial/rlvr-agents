@@ -19,24 +19,27 @@ ssh username@cluster
 # 进入项目目录
 cd /path/to/rlvr-agents
 
-# 提交环境配置任务
-sbatch scripts/slurm/setup_env.sh
+# 首次配置环境：必须在“登录节点”完成（计算节点通常无互联网）
+bash setup_cluster.sh
 
-# 查看任务状态
-squeue -u $USER
-
-# 查看日志
-tail -f logs/setup_*.out
+# 验证环境
+python3 -c "import sys; print(sys.version)"
 ```
 
 ## 运行训练
 
 ```bash
+# 首次提交前创建目录（Slurm 不会自动创建 --output/--error 的父目录）
+mkdir -p logs experiments
+
 # Paper A (toy backend)
 sbatch scripts/slurm/run_paper_a_toy.sh
 
 # Paper B (toy backend)
 sbatch scripts/slurm/run_paper_b_toy.sh
+
+# 或者一次性跑 A+B
+sbatch run_job.sh
 
 # 查看运行中的任务
 squeue -u $USER
@@ -68,7 +71,7 @@ cat experiments/*/EXPERIMENT.md
 
 ## 注意事项
 
-1. **分区名**：脚本中的 `--partition=N32-H` 需根据实际分区名调整
-2. **GPU申请**：`--gres=gpu:1` 申请1块GPU，按需调整
-3. **时间限制**：`--time=02:00:00` 为2小时，超时会被杀掉
-4. **模块加载**：`module load` 命令需根据集群实际模块调整
+1. **严格区分节点**：登录节点只做下载/安装/编辑；训练必须 `sbatch` 到计算节点（见 `超算操作规范手册.md`）。
+2. **离线运行**：计算节点通常无互联网；模型/数据要提前在登录节点下载到本地磁盘。
+3. **分区/资源配比**：用 `sinfo` 确认分区名；按手册 1 GPU 绑定 32 CPU（`--gpus=1` + `--cpus-per-task=32`）。
+4. **Slurm 版本差异**：若 `--gpus=1` 不被支持，改用 `--gres=gpu:1`。

@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=paper_a_toy
-#SBATCH --partition=N32-H           # GPU分区，根据手册调整
+#SBATCH --partition=gpu             # 按超算手册：分区通常为 gpu（如有不同用 sinfo 确认）
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:1                # 申请1块GPU
+#SBATCH --gpus=1                    # 申请1块GPU（如不支持该字段可改用 --gres=gpu:1）
+#SBATCH --cpus-per-task=32          # 按手册：1 GPU 绑定 32 CPU
 #SBATCH --time=02:00:00
 #SBATCH --output=logs/paper_a_%j.out
 #SBATCH --error=logs/paper_a_%j.err
@@ -24,9 +24,9 @@ mkdir -p logs experiments
 
 # 加载环境
 module purge
-module load anaconda3 2>/dev/null || module load miniconda3 2>/dev/null || true
-module load cuda/12.1 2>/dev/null || module load cuda/11.8 2>/dev/null || true
-conda activate rlvr
+module load miniforge3/24.1
+eval "$(conda shell.bash hook)" 2>/dev/null || true
+conda activate rlvr || source activate rlvr
 
 cd $SLURM_SUBMIT_DIR
 
