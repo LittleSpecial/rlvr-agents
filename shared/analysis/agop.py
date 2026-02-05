@@ -121,12 +121,14 @@ def agop_stats_from_grad_vectors(
             trA2_acc += dp * dp
     trA2 = float(trA2_acc / (n * n))
 
-    effective_rank = float((trace * trace) / (trA2 + eps)) if trace > 0 else 0.0
+    # NOTE: Avoid adding an absolute epsilon to tr(A^2) here: it breaks scale invariance and can
+    # yield nonsensical values when gradients are tiny (e.g. near-deterministic policies).
+    effective_rank = float((trace * trace) / trA2) if (trace > 0 and trA2 > 0) else 0.0
 
     top_eig = _power_iteration_top_eig(
         grad_vectors, iters=power_iters, seed=power_seed, eps=eps
     )
-    top_trace_ratio = float(top_eig / (trace + eps)) if trace > 0 else 0.0
+    top_trace_ratio = float(top_eig / trace) if trace > 0 else 0.0
 
     return {
         "trace": trace,
@@ -135,4 +137,3 @@ def agop_stats_from_grad_vectors(
         "top_eig": float(top_eig),
         "top_trace_ratio": top_trace_ratio,
     }
-

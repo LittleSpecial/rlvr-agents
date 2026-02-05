@@ -6,6 +6,7 @@ Verifiable Agent RL with Counterfactual Credit Assignment
 import sys
 import argparse
 import statistics
+import time
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -192,6 +193,7 @@ def main():
     # 初始化实验追踪器
     tracker = ExperimentTracker(config, base_dir=args.output_dir)
     tracker.log_event("init", "Experiment initialized")
+    exp_wall_start = time.time()
     
     # 创建环境
     env_config = EnvConfig(
@@ -322,6 +324,7 @@ def main():
                 pass_at_1=float(pass_at_1),
                 pass_at_k={int(args.num_rollouts_per_prompt): float(pass_at_k)},
                 avg_trajectory_length=float(avg_len),
+                wall_time=float(time.time() - exp_wall_start),
                 avg_credit_spread=float(avg_credit_spread),
                 extra=agop_extra,
             ))

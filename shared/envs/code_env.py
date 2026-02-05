@@ -229,6 +229,7 @@ class CodeEnv(BaseEnv):
     
     def _execute_code(self, code: str) -> Dict[str, Any]:
         """执行代码"""
+        temp_path: Optional[str] = None
         with tempfile.NamedTemporaryFile(
             mode='w', 
             suffix='.py', 
@@ -265,7 +266,12 @@ class CodeEnv(BaseEnv):
                 "returncode": -1
             }
         finally:
-            os.unlink(temp_path)
+            if temp_path:
+                try:
+                    os.unlink(temp_path)
+                except FileNotFoundError:
+                    # On some clusters / cancellation paths the temp file may already be gone.
+                    pass
     
     def _parse_test_result(self, result: Dict[str, Any]) -> VerifierInfo:
         """解析测试结果"""

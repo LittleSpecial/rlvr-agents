@@ -9,6 +9,7 @@ so you can validate the algorithmic pipeline + logging before plugging in a real
 import sys
 import argparse
 import statistics
+import time
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
@@ -212,6 +213,7 @@ def main():
 
     tracker = ExperimentTracker(config, base_dir=args.output_dir)
     tracker.log_event("init", "Experiment initialized")
+    exp_wall_start = time.time()
 
     print(f"Experiment directory: {tracker.experiment_dir}")
     print("\n" + "="*50)
@@ -391,6 +393,7 @@ def main():
                 pass_at_1=avg_batch_success,  # proxy (toy backend)
                 pass_at_k={},
                 avg_trajectory_length=float(sum(t.length for t in trajectories) / max(1, len(trajectories))),
+                wall_time=float(time.time() - exp_wall_start),
                 conflict_ratio=float(conflict.conflict_ratio),
                 solution_diversity=0.0,
                 avg_credit_spread=0.0,
@@ -440,4 +443,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

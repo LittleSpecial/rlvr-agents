@@ -2,9 +2,12 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .venv/
+.DS_Store
 
 experiments/
 experiments_test_*/
+logs/
+未命名/
 
 # Datasets (keep scripts/docs in repo; avoid committing large dumps)
 datasets/**/mbpp_*.jsonl
