@@ -79,6 +79,17 @@ def parse_args():
         default=True,
         help="(hf) exit if CUDA is not available (prevents accidentally running a 7B model on CPU)",
     )
+    parser.add_argument(
+        "--rl_microbatch_size",
+        type=int,
+        default=0,
+        help="(hf) microbatch size for policy-gradient loss forward. 0=auto (recommended for multi-GPU).",
+    )
+    add_bool_flag(
+        "--gradient_checkpointing",
+        default=True,
+        help="(hf) enable gradient checkpointing to reduce activation memory (slower but prevents OOM).",
+    )
     
     # 环境配置
     parser.add_argument("--env_type", type=str, default="code", choices=["code", "sql"])
@@ -519,6 +530,13 @@ def run_hf(args, config: ExperimentConfig) -> None:
     if device.type == "cuda":
         model = model.to(device)
 
+    # Memory helpers for long sequences + DDP.
+    raw_model = model.module if hasattr(model, "module") else model
+    if hasattr(raw_model, "config") and hasattr(raw_model.config, "use_cache"):
+        raw_model.config.use_cache = False
+    if args.gradient_checkpointing and hasattr(raw_model, "gradient_checkpointing_enable"):
+        raw_model.gradient_checkpointing_enable()
+
     if dist_info.distributed:
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[dist_info.local_rank] if device.type == "cuda" else None
@@ -640,6 +658,10 @@ def run_hf(args, config: ExperimentConfig) -> None:
 
         # 5) RL loss and update
         optimizer.zero_grad(set_to_none=True)
+        mb = int(args.rl_microbatch_size)
+        if mb <= 0:
+            # Auto: microbatch to avoid OOM under DDP / long sequences.
+            mb = 2 if dist_info.distributed else 0
         loss, loss_extra = weighted_rl_loss(
             model,
             sequences.to(device),
@@ -647,6 +669,7 @@ def run_hf(args, config: ExperimentConfig) -> None:
             weights=weights,
             eos_token_id=tokenizer.eos_token_id,
             pad_token_id=tokenizer.pad_token_id,
+            micro_batch_size=mb,
         )
         loss.backward()
         if args.grad_clip and args.grad_clip > 0:

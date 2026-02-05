@@ -83,6 +83,7 @@ def weighted_rl_loss(
     weights: List[float],
     eos_token_id: Optional[int],
     pad_token_id: Optional[int],
+    micro_batch_size: int = 0,
 ) -> Tuple["torch.Tensor", dict]:
     """
     Policy-gradient style loss for language models:
@@ -99,17 +100,53 @@ def weighted_rl_loss(
         eos_token_id=eos_token_id,
         pad_token_id=pad_token_id,
     )
-    out = model(input_ids=sequences, attention_mask=attn)
-    nll_sum = per_sample_nll(out.logits, labels)
 
-    w = torch.tensor(weights, device=sequences.device, dtype=nll_sum.dtype)
-    loss_per = w * (nll_sum / comp_lens.to(nll_sum.dtype))
-    loss = loss_per.mean()
+    bsz = int(sequences.size(0))
+    if bsz == 0:
+        raise ValueError("empty batch")
 
+    # micro_batch_size <=0 means "no microbatching" (whole batch at once).
+    mb = int(micro_batch_size) if micro_batch_size is not None else 0
+    if mb <= 0 or mb > bsz:
+        mb = bsz
+
+    # Keep weights on device in the same dtype as NLL.
+    w_full = None
+    loss_sum = torch.zeros((), device=sequences.device, dtype=torch.float32)
+    nll_mean_sum = torch.zeros((), device=sequences.device, dtype=torch.float32)
+    w_sum = torch.zeros((), device=sequences.device, dtype=torch.float32)
+    w_abs_sum = torch.zeros((), device=sequences.device, dtype=torch.float32)
+
+    for start in range(0, bsz, mb):
+        end = min(bsz, start + mb)
+        seq_mb = sequences[start:end]
+        attn_mb = attn[start:end]
+        labels_mb = labels[start:end]
+        comp_mb = comp_lens[start:end]
+
+        out = model(input_ids=seq_mb, attention_mask=attn_mb, use_cache=False)
+        nll_sum = per_sample_nll(out.logits, labels_mb)
+
+        if w_full is None:
+            w_full = torch.tensor(weights, device=sequences.device, dtype=nll_sum.dtype)
+        w = w_full[start:end]
+
+        nll_mean = nll_sum / comp_mb.to(nll_sum.dtype)
+        loss_per = w * nll_mean
+
+        loss_sum = loss_sum + loss_per.sum().to(loss_sum.dtype)
+        nll_mean_sum = nll_mean_sum + nll_mean.sum().to(nll_mean_sum.dtype)
+        w_sum = w_sum + w.sum().to(w_sum.dtype)
+        w_abs_sum = w_abs_sum + w.abs().sum().to(w_abs_sum.dtype)
+
+        # Free per-microbatch activations ASAP.
+        del out
+
+    loss = (loss_sum / float(bsz)).to(sequences.dtype)
     metrics = {
-        "mean_nll": float((nll_sum / comp_lens.to(nll_sum.dtype)).mean().item()),
-        "mean_weight": float(w.mean().item()),
-        "mean_abs_weight": float(w.abs().mean().item()),
+        "mean_nll": float((nll_mean_sum / float(bsz)).item()),
+        "mean_weight": float((w_sum / float(bsz)).item()),
+        "mean_abs_weight": float((w_abs_sum / float(bsz)).item()),
+        "rl_microbatch": int(mb),
     }
     return loss, metrics
-

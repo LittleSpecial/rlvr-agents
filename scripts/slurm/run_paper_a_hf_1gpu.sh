@@ -32,6 +32,7 @@ cd "${SLURM_SUBMIT_DIR}"
 export TMPDIR="${TMPDIR:-$HOME/tmp}"
 mkdir -p "${TMPDIR}"
 export PYTHONNOUSERSITE=1
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 echo "=== Loading modules (cluster template) ==="
 module purge

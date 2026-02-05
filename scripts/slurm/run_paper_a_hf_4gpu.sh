@@ -26,15 +26,17 @@
 #    这会“复制模型到每张卡”，提升吞吐；不会自动做模型切分（不等价于更大模型能放下）。
 # ============================================================
 
-set -euo pipefail
+# 注意：不用 -u，否则 conda 的 deactivate/activate 脚本可能触发 unbound variable 导致作业秒退
+set -eo pipefail
 trap 'rc=$?; echo "[ERR] run_paper_a_hf_4gpu.sh failed at line ${LINENO} (rc=${rc})" >&2' ERR
 
 mkdir -p logs experiments
-cd "${SLURM_SUBMIT_DIR}"
+cd "${SLURM_SUBMIT_DIR:-$PWD}"
 
 export TMPDIR="${TMPDIR:-$HOME/tmp}"
 mkdir -p "${TMPDIR}"
 export PYTHONNOUSERSITE=1
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 echo "=== Loading modules (cluster template) ==="
 module purge
