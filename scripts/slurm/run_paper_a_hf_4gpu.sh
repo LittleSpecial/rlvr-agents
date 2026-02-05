@@ -8,6 +8,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=logs/paper_a_hf_%j.out
 #SBATCH --error=logs/paper_a_hf_%j.err
+#SBATCH --export=ALL
 
 # ============================================================
 # Paper A: Counterfactual Credit Assignment (HF backend, 4×A100)
@@ -26,57 +27,37 @@
 # ============================================================
 
 set -euo pipefail
+trap 'rc=$?; echo "[ERR] run_paper_a_hf_4gpu.sh failed at line ${LINENO} (rc=${rc})" >&2' ERR
 
 mkdir -p logs experiments
 cd "${SLURM_SUBMIT_DIR}"
 
+export TMPDIR="${TMPDIR:-$HOME/tmp}"
+mkdir -p "${TMPDIR}"
+
+echo "=== Loading modules (cluster template) ==="
 module purge
 module load miniforge3/24.1
-# N32-H 手册：CUDA/GCC 模块一般在 compilers/* 下；或直接 source 超算提供的 PyTorch env.sh
-# 推荐：选一个与你 Python 版本 (cp310) + 驱动支持的 CUDA 版本匹配的 env.sh。
-# 你集群当前驱动显示 CUDA 11.6，因此优先 cu116；避免 cu118/cu121 以免报 driver/runtime 不兼容。
-PYTORCH_ENV_SH="${PYTORCH_ENV_SH:-/home/bingxing2/apps/package/pytorch/1.13.1+cu116_cp310/env.sh}"
-if [ -f "${PYTORCH_ENV_SH}" ]; then
-  echo "Sourcing PYTORCH_ENV_SH=${PYTORCH_ENV_SH} (non-fatal)"
-  # shellcheck disable=SC1090
-  set +e
-  source "${PYTORCH_ENV_SH}"
-  _SRC_RC=$?
-  set -e
-  if [ ${_SRC_RC} -ne 0 ]; then
-    echo "Warning: source env.sh failed (rc=${_SRC_RC}); falling back to manual modules"
-  fi
+module load compilers/gcc/9.3.0
+module load compilers/cuda/11.6
+module load "${CUDNN_MODULE:-cudnn/8.6.0.163_cuda11.x}"
+
+echo "=== Module list ==="
+module list 2>&1 || true
+
+echo "=== Conda env / Python selection ==="
+CONDA_ENV="${CONDA_ENV:-$HOME/.conda/envs/rlvr}"
+if [ -d "${CONDA_ENV}" ]; then
+  source activate "${CONDA_ENV}" 2>/dev/null || true
 fi
 
-module load compilers/gcc/9.3.0 2>/dev/null || true
-module load compilers/cuda/11.6 2>/dev/null || true
-# cuDNN is required by CUDA-enabled PyTorch wheels; auto-pick a cuda11.* variant if available.
-if command -v module >/dev/null 2>&1; then
-  if [ -n "${CUDNN_MODULE:-}" ]; then
-    module load "${CUDNN_MODULE}" 2>/dev/null || true
-  else
-    _CUDNN_LIST="$(module avail cudnn 2>&1 || true)"
-    _CUDNN_LIST="$(echo "${_CUDNN_LIST}" | grep -oE 'cudnn/[^[:space:]]+' || true)"
-    _CUDNN_CAND="$(echo "${_CUDNN_LIST}" | grep -E 'cuda11\\.x|cu11' | sort -V | tail -n 1)"
-    if [ -z "${_CUDNN_CAND}" ]; then
-      _CUDNN_CAND="$(echo "${_CUDNN_LIST}" | grep -E 'cuda11|cu11' | sort -V | tail -n 1)"
-    fi
-    if [ -n "${_CUDNN_CAND}" ]; then
-      echo "Auto-loading ${_CUDNN_CAND}"
-      module load "${_CUDNN_CAND}" 2>/dev/null || true
-    else
-      echo "Warning: could not auto-detect a cuda11 cuDNN module (module avail cudnn)."
-    fi
-  fi
+if [ -z "${PYTHON_BIN:-}" ] && [ -x "${CONDA_ENV}/bin/python3" ]; then
+  PYTHON_BIN="${CONDA_ENV}/bin/python3"
 fi
-
-echo "=== Python selection ==="
-PYTHON_BIN="${PYTHON_BIN:-$HOME/.conda/envs/rlvr/bin/python3}"
-if [ -x "${PYTHON_BIN}" ]; then
-  echo "Using PYTHON_BIN=${PYTHON_BIN}"
-else
-  echo "Warning: ${PYTHON_BIN} not found; falling back to PATH python3"
-  PYTHON_BIN="$(command -v python3 || true)"
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || true)}"
+if [ -z "${PYTHON_BIN}" ]; then
+  echo "[ERR] python3 not found in PATH after module load / conda activate." >&2
+  exit 2
 fi
 
 # 离线模式（计算节点通常无互联网）
@@ -94,6 +75,9 @@ echo "GPUs: ${CUDA_VISIBLE_DEVICES:-N/A}"
 echo "PYTHON_BIN: ${PYTHON_BIN}"
 echo "=========================================="
 
+echo "=== nvidia-smi ==="
+nvidia-smi || true
+
 # fail-fast：避免“申请了 4 卡但 torch 只能 CPU 跑”的浪费
 "${PYTHON_BIN}" - <<'PY'
 import torch
@@ -104,7 +88,7 @@ print("device_count:", torch.cuda.device_count())
 if not torch.cuda.is_available():
     raise SystemExit(
         "\n[ERROR] torch.cuda.is_available() == False\n"
-        "You are likely using a CPU-only PyTorch build. Install the cluster-provided CUDA wheel + source env.sh.\n"
+        "大概率是装了 CPU-only PyTorch 或者缺少 cudnn module。\n"
     )
 PY
 
@@ -119,7 +103,7 @@ echo "EVAL_DATA=${EVAL_DATA}"
 
 NUM_GPUS="${SLURM_GPUS_ON_NODE:-4}"
 
-torchrun --standalone --nproc_per_node="${NUM_GPUS}" "${PYTHON_BIN}" paper_a_credit_assignment/train.py \
+"${PYTHON_BIN}" -m torch.distributed.run --standalone --nproc_per_node="${NUM_GPUS}" paper_a_credit_assignment/train.py \
   --experiment_name "paper_a_hf_${SLURM_JOB_ID}" \
   --backend hf \
   --model_path "${MODEL_PATH}" \

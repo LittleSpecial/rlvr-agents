@@ -8,6 +8,7 @@
 #SBATCH --time=12:00:00
 #SBATCH --output=logs/paper_a_hf_%j.out
 #SBATCH --error=logs/paper_a_hf_%j.err
+#SBATCH --export=ALL
 
 # ============================================================
 # Paper A: HF backend (单卡 smoke / debug)
@@ -15,8 +16,11 @@
 #   MODEL_PATH=... TRAIN_DATA=... EVAL_DATA=... sbatch scripts/slurm/run_paper_a_hf_1gpu.sh
 # ============================================================
 
+set -euo pipefail
+trap 'rc=$?; echo "[ERR] run_paper_a_hf_1gpu.sh failed at line ${LINENO} (rc=${rc})" >&2' ERR
+
 echo "=== Job started at $(date) ==="
-echo "Job ID: $SLURM_JOB_ID"
+echo "Job ID: ${SLURM_JOB_ID}"
 echo "Node: $(hostname)"
 echo "PWD: $(pwd)"
 echo "SLURM_SUBMIT_DIR: ${SLURM_SUBMIT_DIR}"
@@ -24,53 +28,37 @@ echo "SLURM_SUBMIT_DIR: ${SLURM_SUBMIT_DIR}"
 mkdir -p logs experiments
 cd "${SLURM_SUBMIT_DIR}"
 
-echo "=== Loading modules ==="
+# tmp 目录：某些集群 /tmp 配额或权限会导致 pip/transformers 临时文件失败
+export TMPDIR="${TMPDIR:-$HOME/tmp}"
+mkdir -p "${TMPDIR}"
+
+echo "=== Loading modules (cluster template) ==="
 module purge
-module load miniforge3/24.1 || echo "Warning: miniforge3 module load failed"
+module load miniforge3/24.1
+module load compilers/gcc/9.3.0
+module load compilers/cuda/11.6
+module load "${CUDNN_MODULE:-cudnn/8.6.0.163_cuda11.x}"
 
-# N32-H 手册：CUDA/GCC 模块一般在 compilers/* 下（不要用 cuda/11.x 这种名字）
-# 如果你安装了超算提供的 PyTorch wheel，可以直接 source 它的 env.sh（里面会 module load）
-# 推荐：选一个与你 Python 版本 (cp310) + 驱动支持的 CUDA 版本匹配的 env.sh。
-# 你集群当前驱动显示 CUDA 11.6，因此优先 cu116；避免 cu118/cu121 以免报 driver/runtime 不兼容。
-PYTORCH_ENV_SH="${PYTORCH_ENV_SH:-/home/bingxing2/apps/package/pytorch/1.13.1+cu116_cp310/env.sh}"
-if [ -f "${PYTORCH_ENV_SH}" ]; then
-  echo "Sourcing PYTORCH_ENV_SH=${PYTORCH_ENV_SH} (non-fatal)"
-  # shellcheck disable=SC1090
-  source "${PYTORCH_ENV_SH}" || echo "Warning: source env.sh failed; falling back to manual modules"
-fi
-
-module load compilers/gcc/9.3.0 2>/dev/null || true
-module load compilers/cuda/11.6 2>/dev/null || true
-# cuDNN is required by CUDA-enabled PyTorch wheels; auto-pick a cuda11.* variant if available.
-if command -v module >/dev/null 2>&1; then
-  if [ -n "${CUDNN_MODULE:-}" ]; then
-    module load "${CUDNN_MODULE}" 2>/dev/null || true
-  else
-    _CUDNN_LIST="$(module avail cudnn 2>&1 || true)"
-    _CUDNN_LIST="$(echo "${_CUDNN_LIST}" | grep -oE 'cudnn/[^[:space:]]+' || true)"
-    _CUDNN_CAND="$(echo "${_CUDNN_LIST}" | grep -E 'cuda11\\.x|cu11' | sort -V | tail -n 1)"
-    if [ -z "${_CUDNN_CAND}" ]; then
-      _CUDNN_CAND="$(echo "${_CUDNN_LIST}" | grep -E 'cuda11|cu11' | sort -V | tail -n 1)"
-    fi
-    if [ -n "${_CUDNN_CAND}" ]; then
-      echo "Auto-loading ${_CUDNN_CAND}"
-      module load "${_CUDNN_CAND}" 2>/dev/null || true
-    else
-      echo "Warning: could not auto-detect a cuda11 cuDNN module (module avail cudnn)."
-    fi
-  fi
-fi
+echo "=== Module list ==="
+module list 2>&1 || true
 
 echo "=== CUDA check ==="
 nvidia-smi || echo "Warning: nvidia-smi failed"
 
-echo "=== Python selection ==="
-PYTHON_BIN="${PYTHON_BIN:-$HOME/.conda/envs/rlvr/bin/python3}"
-if [ -x "${PYTHON_BIN}" ]; then
-  echo "Using PYTHON_BIN=${PYTHON_BIN}"
-else
-  echo "Warning: ${PYTHON_BIN} not found; falling back to PATH python3"
-  PYTHON_BIN="$(command -v python3 || true)"
+echo "=== Conda env / Python selection ==="
+CONDA_ENV="${CONDA_ENV:-$HOME/.conda/envs/rlvr}"
+if [ -d "${CONDA_ENV}" ]; then
+  # 工程师模板：source activate /path/to/env
+  source activate "${CONDA_ENV}" 2>/dev/null || true
+fi
+
+if [ -z "${PYTHON_BIN:-}" ] && [ -x "${CONDA_ENV}/bin/python3" ]; then
+  PYTHON_BIN="${CONDA_ENV}/bin/python3"
+fi
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || true)}"
+if [ -z "${PYTHON_BIN}" ]; then
+  echo "[ERR] python3 not found in PATH after module load / conda activate." >&2
+  exit 2
 fi
 
 echo "=== Python info ==="
@@ -87,11 +75,8 @@ print("device_count:", torch.cuda.device_count())
 if not torch.cuda.is_available():
     raise SystemExit(
         "\n[ERROR] torch.cuda.is_available() == False\n"
-        "This usually means you installed a CPU-only PyTorch build on N32-H (aarch64).\n"
-        "Fix: install the cluster-provided CUDA PyTorch wheel and source its env.sh, e.g. (per manual):\n"
-        "  pip install /home/bingxing2/apps/package/pytorch/<...>/*.whl\n"
-        "  source /home/bingxing2/apps/package/pytorch/<...>/env.sh\n"
-        "Then re-submit the job.\n"
+        "大概率是装了 CPU-only PyTorch 或者缺少 cudnn module。\n"
+        "按 N32-H 手册：module load cudnn/... 并安装集群提供的 CUDA PyTorch wheel。\n"
     )
 PY
 
