@@ -52,7 +52,10 @@ if command -v module >/dev/null 2>&1; then
   if [ -n "${CUDNN_MODULE:-}" ]; then
     module load "${CUDNN_MODULE}" 2>/dev/null || true
   else
-    _CUDNN_CAND="$(module avail cudnn 2>&1 | grep -oE 'cudnn/[^[:space:]]+' | grep -E 'cuda11|cu11' | head -n 1)"
+    _CUDNN_CAND="$(module avail cudnn 2>&1 | grep -oE 'cudnn/[^[:space:]]+' | grep -E 'cuda11\\.x|cu11' | head -n 1)"
+    if [ -z "${_CUDNN_CAND}" ]; then
+      _CUDNN_CAND="$(module avail cudnn 2>&1 | grep -oE 'cudnn/[^[:space:]]+' | grep -E 'cuda11|cu11' | head -n 1)"
+    fi
     if [ -n "${_CUDNN_CAND}" ]; then
       echo "Auto-loading ${_CUDNN_CAND}"
       module load "${_CUDNN_CAND}" 2>/dev/null || true
