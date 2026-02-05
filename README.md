@@ -41,8 +41,8 @@ neurips2026_plans/
 # Toy backend（可本地跑通闭环，无重依赖）
 # 仅需 Python 3.10+
 
-# Real LLM 训练（后续接 HF Transformers / vLLM 时需要）
-pip install torch transformers pyyaml
+# Real LLM 训练（HF Transformers + LoRA）
+python3 -m pip install -r requirements.txt
 ```
 
 ## 数据集（CodeEnv）
@@ -77,6 +77,30 @@ python3 paper_a_credit_assignment/train.py \
     --max_steps 200 \
     --log_interval 10
 ```
+
+### HF 后端（真实模型）
+
+先准备 `CodeEnv` JSONL 数据集（见 `datasets/code/README.md`），然后：
+
+```bash
+python3 paper_a_credit_assignment/train.py \
+  --experiment_name hf_smoke \
+  --backend hf \
+  --model_path /path/to/local/Qwen2.5-7B-Instruct \
+  --env_type code \
+  --no-show_tests \
+  --train_dataset datasets/code/mbpp_train.jsonl \
+  --eval_dataset datasets/code/humaneval_test.jsonl \
+  --dtype bf16 \
+  --batch_size 2 \
+  --num_rollouts_per_prompt 2 \
+  --max_new_tokens 256 \
+  --max_steps 50 \
+  --log_interval 5 \
+  --eval_interval 25
+```
+
+单机多卡（DDP）建议用 `torchrun`（见 `scripts/slurm/run_paper_a_hf_4gpu.sh`）。
 
 ### 关键参数
 

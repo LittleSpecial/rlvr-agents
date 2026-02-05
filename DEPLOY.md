@@ -35,6 +35,19 @@ mkdir -p logs experiments
 # Paper A (toy backend)
 sbatch scripts/slurm/run_paper_a_toy.sh
 
+# Paper A (HF backend, 单机 4 卡)
+# 需要提前在登录节点下载好模型/数据，并设置路径：
+MODEL_PATH=/path/to/local/Qwen2.5-7B-Instruct \
+TRAIN_DATA=datasets/code/mbpp_train.jsonl \
+EVAL_DATA=datasets/code/humaneval_test.jsonl \
+sbatch scripts/slurm/run_paper_a_hf_4gpu.sh
+
+# Paper A (HF backend, 单卡 debug)
+MODEL_PATH=/path/to/local/Qwen2.5-7B-Instruct \
+TRAIN_DATA=datasets/code/mbpp_train.jsonl \
+EVAL_DATA=datasets/code/humaneval_test.jsonl \
+sbatch scripts/slurm/run_paper_a_hf_1gpu.sh
+
 # Paper B (toy backend)
 sbatch scripts/slurm/run_paper_b_toy.sh
 

@@ -3,11 +3,15 @@ __pycache__/
 .pytest_cache/
 .venv/
 .DS_Store
+tmp/
 
 experiments/
 experiments_test_*/
 logs/
 未命名/
+
+# Local cluster manuals / docs
+北京超级云计算中心N32-H分区用户手册v2.7.pdf
 
 # Datasets (keep scripts/docs in repo; avoid committing large dumps)
 datasets/**/mbpp_*.jsonl
