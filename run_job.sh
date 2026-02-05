@@ -10,7 +10,7 @@
 # === 环境加载 ===
 module load miniforge3/24.1
 # 如果需要特定CUDA版本: module load compilers/cuda/11.6
-source activate rlvr
+conda activate rlvr
 
 # 调试信息
 echo "=========================================="

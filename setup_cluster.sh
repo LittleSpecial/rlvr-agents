@@ -16,7 +16,7 @@ else
     conda create -n rlvr python=3.10 -y
 fi
 
-source activate rlvr
+conda activate rlvr
 
 # 安装依赖 (登录节点有网络)
 echo "安装 PyTorch..."
