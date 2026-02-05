@@ -19,7 +19,7 @@
 # - 若 CUDA 不可用，打印手册对应的修复建议（安装超算提供的 PyTorch CUDA wheel + source env.sh）
 # ============================================================
 
-set -euo pipefail
+set -eo pipefail  # 注意：不用 -u，否则 conda 的 deactivate 脚本会报 unbound variable
 trap 'rc=$?; echo "[ERR] setup_env.sh failed at line ${LINENO} (rc=${rc})" >&2' ERR
 echo "=== RLVR Environment Setup ==="
 echo "Job ID: $SLURM_JOB_ID"

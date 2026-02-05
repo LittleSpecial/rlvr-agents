@@ -16,7 +16,7 @@
 #   MODEL_PATH=... TRAIN_DATA=... EVAL_DATA=... sbatch scripts/slurm/run_paper_a_hf_1gpu.sh
 # ============================================================
 
-set -euo pipefail
+set -eo pipefail  # 注意：不用 -u，否则 conda 的 deactivate 脚本会报 unbound variable
 trap 'rc=$?; echo "[ERR] run_paper_a_hf_1gpu.sh failed at line ${LINENO} (rc=${rc})" >&2' ERR
 
 echo "=== Job started at $(date) ==="
