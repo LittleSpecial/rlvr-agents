@@ -45,6 +45,20 @@ neurips2026_plans/
 pip install torch transformers pyyaml
 ```
 
+## 数据集（CodeEnv）
+
+- 格式：JSONL，一行一个任务；字段规范见 `datasets/code/README.md`
+- 示例：`datasets/code/example.jsonl`
+- 从 HuggingFace 导出（不建议把大文件提交 GitHub）：
+
+```bash
+python3 -m pip install datasets
+
+python3 scripts/prepare_code_dataset_hf.py --dataset mbpp --split train --out datasets/code/mbpp_train.jsonl
+python3 scripts/prepare_code_dataset_hf.py --dataset openai_humaneval --split test --out datasets/code/humaneval_test.jsonl
+python3 scripts/validate_code_jsonl.py datasets/code/mbpp_train.jsonl
+```
+
 ## Paper A: Verifiable Agent RL with Counterfactual Credit Assignment
 
 **核心思想**: 用反事实重放估计每个step对最终成功的边际贡献，将稀疏的最终reward转化为step-level credit。
@@ -57,6 +71,7 @@ python3 paper_a_credit_assignment/train.py \
     --backend toy \
     --model_name Qwen2.5-7B \
     --env_type code \
+    --no-show_tests \
     --counterfactual_k 4 \
     --intervention_types delete truncate \
     --max_steps 200 \
@@ -70,10 +85,11 @@ python3 paper_a_credit_assignment/train.py \
 | `--counterfactual_k`     | 4               | 每条轨迹的反事实数量 |
 | `--intervention_types`   | delete truncate | 干预类型             |
 | `--credit_normalization` | signed          | Credit归一化方式     |
+| `--log_agop`             | true            | 记录 toy 梯度的 AGOP 统计 |
 
-## Paper B: Conflict-aware RLVR
+## Paper B: Interference-aware RLVR (Multi-Skill Code)
 
-**核心思想**: 检测不同任务簇的梯度冲突，通过梯度手术缓解模式塌缩，保持pass@k多样性。
+**核心思想**: 在 multi-skill RLVR 中显式控制跨 skill 的干扰（interference）与遗忘（retention），用“skill-safe”约束投影在提升目标 skill 的同时尽量不伤害受保护 skills。
 
 ### 运行
 
@@ -83,9 +99,13 @@ python3 paper_b_conflict_aware/train.py \
     --backend toy \
     --model_name Qwen2.5-7B \
     --env_type code \
-    --group_strategy task_type \
-    --num_groups 4 \
-    --surgery_method pcgrad \
+    --no-show_tests \
+    --protocol sequential \
+    --skill_sequence type0 type1 \
+    --stage_steps 50 \
+    --projection sequential_margin \
+    --epsilon 0.0 \
+    --memory_per_protected 4 \
     --max_steps 200 \
     --log_interval 10
 ```
@@ -94,10 +114,12 @@ python3 paper_b_conflict_aware/train.py \
 
 | 参数                   | 默认值     | 说明         |
 | ---------------------- | ---------- | ------------ |
-| `--group_strategy`     | difficulty | 分组策略     |
-| `--num_groups`         | 4          | 组数量       |
-| `--surgery_method`     | pcgrad     | 梯度手术算法 |
-| `--conflict_threshold` | 0.0        | 冲突阈值     |
+| `--protocol`           | mixed      | mixed / sequential |
+| `--skill_sequence`     | (auto)     | sequential 的 skill 顺序 |
+| `--stage_steps`        | 2000       | 每个 stage 训练步数 |
+| `--projection`         | sequential_margin | 约束投影方法（pcgrad 是 epsilon=0 特例） |
+| `--epsilon`            | 0.0        | 约束松弛：dot(g_s, Δθ) >= -epsilon |
+| `--memory_per_protected` | 8        | 每步对受保护 skill 采样多少 prompts 来估计约束梯度 |
 
 ## 实验记录
 

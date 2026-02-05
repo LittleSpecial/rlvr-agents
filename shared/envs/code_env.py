@@ -73,7 +73,8 @@ class CodeEnv(BaseEnv):
         obs_content = f"Task: {self.current_task.prompt}\n\n"
         if self.current_task.initial_code:
             obs_content += f"Initial Code:\n```{self.current_task.language}\n{self.current_task.initial_code}\n```\n\n"
-        if self.current_task.test_code:
+        show_tests = bool(self.config.extra.get("show_tests", True))
+        if show_tests and self.current_task.test_code:
             obs_content += f"Test Cases:\n```{self.current_task.language}\n{self.current_task.test_code}\n```"
         
         return Observation(

@@ -11,8 +11,6 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     torch = None  # type: ignore[assignment]
 
-import sys
-sys.path.append('..')
 from shared.envs.base import Trajectory
 from .credit_estimator import CreditMap
 

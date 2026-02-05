@@ -8,8 +8,6 @@ import statistics
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 
-import sys
-sys.path.append('..')
 from shared.envs.base import Trajectory
 from .counterfactual import CounterfactualResult, InterventionType
 

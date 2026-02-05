@@ -1,78 +1,106 @@
-# NeurIPS 2026 Paper B（更 RL / 更“有内容”）— Conflict-aware RLVR for LLM Reasoning
+# NeurIPS 2026 Paper B（更 RL / 代码向）— Interference-aware RLVR for Multi-Skill Code Models
 
-> 目标：做一篇偏 **机制 + 新方法 + 实证** 的 RL 论文，围绕 RLVR（对 LLM 进行可验证奖励的 RL，如 pass@1 / unit tests / exact match）中常见的 **多样性下降/高 k 退化/模式塌缩** 等现象，给出一个“可解释 + 可修复”的方法学贡献。
+> 目标：做一篇偏 **机制 + 新方法 + 实证** 的 RL 论文，但刻意避开“修 pass@k / 防多样性塌缩”这条拥挤主线。  
+> 我们把关注点改成更 RL 的问题：**multi-skill / continual RLVR** 下的 *interference*（负迁移）与 *retention*（不遗忘），面向 **代码任务**（unit tests / compile / execute 等可验证奖励）。
 
 ## 1. 背景与动机（Motivation）
 
 ### 1.1 观察到的问题
-在“可验证奖励 + policy optimization”的训练中，常见现象包括：
-- pass@1 变好，但 pass@k/多解多样性变差；
-- 策略从“探索多种解法”切到“单一模板/捷径”；
-- 不同题型（难题/易题、不同主题/不同推理模式）更新相互干扰，导致部分能力被压掉。
+在“可验证奖励 + policy optimization（RLVR）”的代码训练中，经常会遇到：
+- 针对某一类代码任务做 RL 后，另一类任务性能下降（负迁移 / 遗忘）。
+- 先训 A 再训 B：B 上升，但 A 掉得明显（catastrophic forgetting）。
+- 多任务混训：总体指标上升，但最差子任务（worst-skill）很差，且对 seed 很敏感。
+
+现实痛点：我们通常希望“在不伤害已有能力”的情况下，用 RLVR 增加新技能或提升某一技能（例如 bug fixing），而不是拿一个更偏科的模型。
 
 ### 1.2 核心假设（Mechanism Hypothesis）
-把 RLVR 看成在一个混合分布上的优化：每个 batch 里不同子任务/不同推理模式对应不同梯度方向。  
-当这些方向 **冲突（梯度夹角为负）** 时，标准的 PPO/GRPO 更新会产生 **负迁移**，表现为：
-- 某些模式被系统性削弱；
-- 最终在采样空间里“边界收缩”（高 k 不再多样）。
+把 RLVR 看成一个多目标/多技能的优化：每个技能（skill/task）对应一个可验证 reward。  
+标准 PPO/GRPO 往往在“平均意义上”最大化总体回报，但不保证每个 skill 都不受伤。  
+在参数共享（尤其是 LoRA/adapter 低秩参数）下，更新会把某些 skill 的决策边界推到不利方向，导致可测的遗忘与负迁移。
 
 研究问题：
-**能否显式检测并缓解这种“梯度冲突”，从而在提升 pass@1 的同时保留 pass@k、多样性与稳健性？**
+**能否在 RLVR 中显式控制“跨技能干扰”，实现：训练新 skill 的同时，旧 skill 的性能不下降（或下降受控）？**
 
 ## 2. 核心 idea（One-liner）
 
-在 RLVR 更新里加入一个轻量的 **conflict-aware 梯度处理**（类似 gradient surgery / 投影），让来自不同“任务簇/难度簇/推理簇”的更新尽量不互相伤害，从优化层面抑制模式塌缩。
+把 RLVR 训练改写为 **skill-safe 的约束优化 / 多目标优化**：在提升目标 skill 的同时，对其它 skill 加 “do-no-harm / bounded forgetting” 约束；用低开销（仅在 LoRA/adapter 参数上）的近似投影/修正来实现。
 
 ## 3. 方法框架（Method）
 
-### 3.1 任务分簇（Task/Mode Partition）
-把每个样本分到一个簇 `g`，用于计算组梯度：
-- 按 **难度**：用 base model 的 pass@k / logprob / self-consistency 估计难度
-- 按 **题型**：math / code / logic / reading（如果数据带标签）
-- 按 **解法模式**：用简单的特征（是否生成代码、是否调用工具、是否产生长 CoT）
+### 3.1 skill 定义与训练协议（Protocols）
+定义 skills：一组可验证的代码子任务（每个 skill 都有 verifier）：
+- 代码生成（unit tests）
+- 代码修复/补丁（unit tests）
+- 代码推理/重构（compile/execute/format checks）
 
-### 3.2 组梯度与冲突度量
-在一次更新里，对每个组 `g` 计算 `∇_g`（对 RL objective 的梯度估计）。  
-定义冲突：`cos(∇_g, ∇_h) < 0` 或者 dot product 为负。
+训练协议（至少 2 种都要做）：
+- **Sequential**：先训 skill A，再训 B、C…（典型遗忘场景）
+- **Mixed**：多 skill 混训（典型 worst-skill 场景）
 
-### 3.3 冲突缓解策略（核心算法）
-给出一个“最小改动”的优化规则（便于审稿人理解与复现）：
-- **投影/手术**：当 `∇_g · ∇_h < 0` 时，把 `∇_g` 在 `∇_h` 的反方向分量去掉
-- 最终更新方向 `∇* = aggregate({∇_g'})`
+### 3.2 约束式 RLVR（Skill-safe Update）
+设每个 skill 为 `s∈{1..S}`，对应一个 RLVR surrogate objective `J_s(θ)`（如 PPO/GRPO 的期望优势）。  
+我们希望最大化目标 skill（或平均）同时满足“其它 skill 不退化”：
+
+- 目标：`max_θ  J_target(θ)`（或 `Σ_s w_s J_s(θ)`）
+- 约束：对每个受保护 skill `s`，要求 `J_s(θ_new) ≥ J_s(θ_old) - ε`
+
+一阶近似后可转成对更新方向 `Δθ` 的线性约束：
+- `∇J_s(θ_old) · Δθ ≥ -ε`
+
+然后做一个 **最小改动投影**：从候选更新 `g`（比如目标 skill 的梯度或加权平均梯度）出发，求一个满足约束的 `Δθ*`。
+
+工程落地要点：
+- 只在 **LoRA/adapter 参数** 上做（维度小、开销可控）
+- 约束 skill 数 `S` 不要太大（2–8 个足够先出论文）
+
+### 3.3 低开销的实现近似（Practical Approximation）
+你不需要一开始就上复杂 QP 求解器，可以按“从简到繁”做：
+- **Sequential projection**：依次对每个约束 skill 做投影修正（一次只处理一个约束）
+- **Trigger-based**：只在检测到遗忘趋势（protected skill 的在线评测下降）时启用
+- **Memory-based constraints（小回放）**：每个 protected skill 保留少量 prompt（几十到几百），用它估计 `∇J_s`，避免每步都大规模采样
 
 工程上要点：
-- 组数要少（2–8 组），否则开销大；
-- 可以只在冲突严重时启用（阈值触发）。
+- 受保护 skills 越多越难；建议先从 “保护 1–2 个关键 skill” 做起。
+- 约束松弛 `ε` 要做 sweep：`ε=0` 太硬可能学不动，`ε>0` 更现实。
 
 ### 3.4 与 RLVR recipe 的兼容
 把它做成“插在 optimizer 前的一层”，兼容：
-- GRPO / PPO / REINFORCE（只要能拿到 per-group gradient）
-- 以及 KL/entropy 正则（依旧保留，但不是主修补手段）
+- GRPO / PPO（主推）
+- REINFORCE（作为 sanity baseline）
+- KL/entropy 正则：可以保留，但论文主卖点是 **retention/skill-safety**，不是“更强正则”
 
 ## 4. 实验设计（Eval）
 
-### 4.1 环境与任务（偏大模型、非机器人控制）
-优先选择 **可验证奖励** 的推理任务（方便大规模实验）：
-- 代码：unit-test / compile / execute（最干净）
-- 数学：exact answer check（注意格式化/等价性）
-- 结构化输出：parser/validator
+### 4.1 任务与数据（代码向）
+优先选择可复现、可并行的大规模 verifier：
+- unit tests（最核心）
+- compile/execute（补充）
 
-### 4.2 指标（必须覆盖“边界收缩”）
-- pass@1、pass@k（k=4/8/16）
-- 多样性度量：unique solutions、n-gram/AST 多样性（针对 code）
-- 可靠性：失败模式、错误类型分布
-- 训练稳定性：不同 seed 方差
+数据来源可以先从“小而干净”的集合做起，再扩：
+- 生成：HumanEval/MBPP 风格
+- 修复：小型 bugfix 数据（有测试即可）
+
+### 4.2 指标（必须覆盖 retention）
+除每个 skill 的成功率外，重点指标是：
+- **Avg**：平均成功率
+- **Worst-skill**：最差 skill 成功率（公平性/鲁棒性）
+- **Forgetting**：训练后相对训练前/峰值的下降幅度
+- **Forward transfer**：训新 skill 是否顺便提升旧 skill（可选）
+- 训练稳定性：seed 方差、学习曲线震荡
+
+（可选）成本指标：token/tool cost（如果你们想给“现实可用性”加分）
 
 ### 4.3 对比基线（强对比才像 NeurIPS）
-- 原始 GRPO/PPO（+常用 KL/entropy）
-- data-centric：难度过滤/重采样/ curriculum（如果你们愿意做）
-- reward shaping：过程奖励/自一致性奖励（可选）
+- 原始 GRPO/PPO（单 skill、混训、顺序训三种协议）
+- 仅加 KL/entropy
+- 经验回放（简单 replay）：为旧 skill 混入少量样本
+- 常见 continual learning 正则（如 EWC 类、L2 到旧参数；可选）
 
-### 4.4 机制验证（让“机制假设”站得住）
-你需要把“梯度冲突 → 模式塌缩”这条链条证出来：
-- 冲突统计：训练过程中冲突比例如何变化
-- “被压掉的簇”：哪一类任务/哪一种解法模式贡献下降
-- 手术前后：冲突下降 ↔ pass@k/多样性回升
+### 4.4 机制验证（让“干扰”站得住）
+你需要把“interference → forgetting”这条链条证出来：
+- 哪些 skill 对哪些 skill 造成最大伤害（干扰矩阵）
+- 约束启用前后：forgetting 曲线是否显著改善
+- 保护强度（`ε`）与目标提升的 trade-off（Pareto 曲线）
 
 ## 5. 资源与实现（Implementation Notes）
 
@@ -83,21 +111,20 @@
 
 ### 5.2 工程拆解（最小可行）
 - dataset loader + verifier
-- rollout sampler（支持 n-sample 用于 pass@k 估计）
+- rollout sampler（每个 prompt 采样 n 次用于稳定估计）
 - RL trainer（GRPO/PPO）
-- group assignment（按难度/题型/模式）
-- per-group grad 计算 + conflict surgery
-- logging（冲突矩阵、簇内/簇间指标）
+- skill assignment（按任务簇/数据源/工具类型）
+- per-skill grad 估计 + constraint projection（只做 LoRA/adapter）
+- logging（干扰矩阵、forgetting 曲线、worst-skill）
 
 ## 6. 风险点与规避（Risks）
-- “别人已经做过类似梯度手术”：需要系统性 related-work 检索与清晰区分（例如他们若是多目标 RL 或多任务 SFT 的冲突处理，你强调 **RLVR 的边界收缩现象 + pass@k 指标 + 可验证奖励场景**）。
-- 组划分不合理：做一个最稳的（按难度二分/三分），并做 ablation。
-- 开销过大：组数小 + 触发式启用 + 只对部分层/部分梯度做（如 adapter 层）。
+- 和“梯度冲突/多样性”主线混淆：论文叙事要明确：我们优化的是 **retention/worst-skill/forgetting**，不是 pass@k。
+- 受保护 skills 太多导致目标 skill 学不动：先从 2–4 skills 做起，逐步扩展。
+- 开销过大：只在 LoRA/adapter 上算；memory-based 估计；触发式启用。
 
 ## 7. 里程碑（粗略）
-- W1：复现 RLVR baseline + 复现“边界收缩”现象（pass@1 vs pass@k）
-- W2–W3：实现 group + 冲突统计 + 初版 surgery
-- W4–W5：扩到多个任务/多个模型规模 + 强消融
-- W6–W7：机制分析图表 + 论文写作
-- W8：收敛结果 + 打磨叙事 + 最终成稿
-
+- W1：搭建 2–3 个 code skills + 跑通单 skill RLVR baseline
+- W2：跑通 sequential vs mixed 协议 + 复现 forgetting/worst-skill 问题
+- W3–W4：实现 skill-safe update（投影/触发式）+ 初版 ablation
+- W5–W6：扩到 4–6 skills + 更大模型/更多 seeds + 机制分析图表
+- W7–W8：写作与打磨（trade-off/Pareto、干扰矩阵、案例分析）

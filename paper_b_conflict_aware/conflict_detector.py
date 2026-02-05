@@ -64,12 +64,16 @@ class ConflictDetector:
         """
         group_gradients = {}
         
-        for group_id, loss in group_losses.items():
+        group_ids = sorted(group_losses.keys())
+        for idx, group_id in enumerate(group_ids):
+            loss = group_losses[group_id]
             # 清空梯度
             model.zero_grad()
             
             # 反向传播
-            loss.backward(retain_graph=True)
+            # Only retain graph when we still need it for subsequent groups.
+            retain = idx != (len(group_ids) - 1)
+            loss.backward(retain_graph=retain)
             
             # 收集梯度
             grads = []

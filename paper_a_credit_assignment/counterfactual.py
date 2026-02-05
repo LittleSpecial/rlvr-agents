@@ -11,8 +11,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import random
 import copy
 
-import sys
-sys.path.append('..')
 from shared.envs.base import Trajectory, Step, Action, ActionType, Observation, VerifierInfo
 
 

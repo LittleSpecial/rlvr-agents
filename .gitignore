@@ -5,3 +5,9 @@ __pycache__/
 
 experiments/
 experiments_test_*/
+
+# Datasets (keep scripts/docs in repo; avoid committing large dumps)
+datasets/**/mbpp_*.jsonl
+datasets/**/humaneval_*.jsonl
+datasets/**/*.parquet
+datasets/**/*.arrow

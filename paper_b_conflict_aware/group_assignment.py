@@ -8,8 +8,6 @@ from enum import Enum
 import math
 from typing import Any, Dict, List, Optional
 
-import sys
-sys.path.append('..')
 from shared.envs.base import Trajectory
 
 

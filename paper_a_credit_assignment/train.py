@@ -15,6 +15,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 from shared.experiment_tracking import ExperimentTracker, ExperimentConfig, RunMetrics
 from shared.envs import CodeEnv, EnvConfig, SQLEnv
 from shared.envs.base import Action, ActionType, Trajectory
+from shared.analysis import agop_stats_from_grad_vectors
 from shared.toy import ToyCategoricalPolicy, get_toy_tasks
 
 from paper_a_credit_assignment import (
@@ -53,13 +54,19 @@ def parse_args():
     # 环境配置
     parser.add_argument("--env_type", type=str, default="code", choices=["code", "sql"])
     parser.add_argument("--max_trajectory_length", type=int, default=20)
-    
+    parser.add_argument("--show_tests", action=argparse.BooleanOptionalAction, default=True,
+                        help="(code env) whether to show unit tests in the observation")
+
     # Paper A 特定配置
     parser.add_argument("--use_counterfactual_credit", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--counterfactual_k", type=int, default=4)
     parser.add_argument("--intervention_types", nargs="+", default=["delete", "truncate"])
     parser.add_argument("--credit_normalization", type=str, default="signed",
                         choices=["signed", "minmax", "zscore", "softmax", "none"])
+    parser.add_argument("--log_agop", action=argparse.BooleanOptionalAction, default=True,
+                        help="Log AGOP (Average Gradient Outer Product) stats on toy policy gradients.")
+    parser.add_argument("--agop_power_iters", type=int, default=30,
+                        help="Power-iteration steps for estimating top AGOP eigenvalue.")
     
     # 输出配置
     parser.add_argument("--output_dir", type=str, default="./experiments")
@@ -138,6 +145,27 @@ def _pass_at_k_from_groups(trajectories: List[Trajectory], k: int) -> float:
     return hits / len(groups)
 
 
+def _toy_grad_vectors(
+    action_indices: List[int],
+    weights: List[float],
+    probs: List[float],
+) -> List[List[float]]:
+    """
+    Per-sample gradient vectors in logit space for REINFORCE:
+        g_i = w_i * (one_hot(a_i) - probs)
+    """
+    if len(action_indices) != len(weights):
+        raise ValueError("action_indices and weights must have same length")
+    k = len(probs)
+    out: List[List[float]] = []
+    for a, w in zip(action_indices, weights):
+        g = [0.0 for _ in range(k)]
+        for j in range(k):
+            g[j] = float(w) * ((1.0 if j == a else 0.0) - float(probs[j]))
+        out.append(g)
+    return out
+
+
 def main():
     args = parse_args()
     
@@ -169,7 +197,8 @@ def main():
     env_config = EnvConfig(
         name=args.env_type,
         max_steps=args.max_trajectory_length,
-        seed=args.seed
+        seed=args.seed,
+        extra={"show_tests": args.show_tests},
     )
     
     if args.env_type == "code":
@@ -256,6 +285,27 @@ def main():
                     w *= float(credit_weight)
             weights.append(w)
 
+        agop_extra: Dict[str, float] = {}
+        if args.log_agop and (step % args.log_interval == 0):
+            probs = policy.probs(temperature=args.temperature)
+            agop_base = agop_stats_from_grad_vectors(
+                _toy_grad_vectors(chosen_indices, advantages, probs),
+                power_iters=args.agop_power_iters,
+                power_seed=args.seed,
+            )
+            agop_used = agop_stats_from_grad_vectors(
+                _toy_grad_vectors(chosen_indices, weights, probs),
+                power_iters=args.agop_power_iters,
+                power_seed=args.seed + 1,
+            )
+            agop_extra = {
+                "agop_trace": float(agop_used["trace"]),
+                "agop_effective_rank": float(agop_used["effective_rank"]),
+                "agop_top_trace_ratio": float(agop_used["top_trace_ratio"]),
+                "agop_baseline_effective_rank": float(agop_base["effective_rank"]),
+                "agop_baseline_top_trace_ratio": float(agop_base["top_trace_ratio"]),
+            }
+
         update_info = policy.reinforce_update(chosen_indices, weights, lr=args.toy_lr, temperature=args.temperature)
 
         if step % args.log_interval == 0:
@@ -273,6 +323,7 @@ def main():
                 pass_at_k={int(args.num_rollouts_per_prompt): float(pass_at_k)},
                 avg_trajectory_length=float(avg_len),
                 avg_credit_spread=float(avg_credit_spread),
+                extra=agop_extra,
             ))
             tracker.log_event("train", "logged step metrics", update_info)
 

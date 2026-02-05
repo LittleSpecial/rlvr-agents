@@ -71,6 +71,8 @@ class RunMetrics:
     solution_diversity: float = 0.0
     # Paper A
     avg_credit_spread: float = 0.0
+    # Extra scalars for analysis (e.g., AGOP stats)
+    extra: Dict[str, Any] = field(default_factory=dict)
 
 
 class ExperimentTracker:
