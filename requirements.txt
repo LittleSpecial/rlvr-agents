@@ -1,0 +1,25 @@
+# RLVR Agents - Requirements
+# Python >= 3.10
+
+# Core (always needed)
+numpy>=1.24.0
+pyyaml>=6.0
+
+# For real LLM training (HF backend)
+torch>=2.0.0
+transformers>=4.36.0
+accelerate>=0.25.0
+peft>=0.7.0  # LoRA
+datasets>=2.16.0
+trl>=0.7.0  # RLHF/PPO
+
+# For faster inference (optional)
+# vllm>=0.2.7
+
+# Experiment tracking (optional)
+# wandb>=0.16.0
+# tensorboard>=2.15.0
+
+# Development
+# pytest>=7.4.0
+# black>=23.0.0
