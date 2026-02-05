@@ -52,6 +52,29 @@ pip install /home/bingxing2/apps/package/pytorch/1.11.0+cu113_cp38/*.whl
 source /home/bingxing2/apps/package/pytorch/1.11.0+cu113_cp38/env.sh
 ```
 
+在你这台机器上（你贴的列表里），更推荐直接用 **cp310 + cu116**（因为 `nvidia-smi` 显示驱动 CUDA 11.6）：
+
+```bash
+pip uninstall -y torch torchvision torchaudio
+pip install /home/bingxing2/apps/package/pytorch/1.13.1+cu116_cp310/*.whl
+source /home/bingxing2/apps/package/pytorch/1.13.1+cu116_cp310/env.sh
+python3 -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available(), torch.cuda.device_count())"
+```
+
+如果 `source .../env.sh` 报类似 `Unable to locate a modulefile for 'anaconda/2021.11'`，说明该 `env.sh` 里加载了集群上不存在的模块。
+这不影响你使用 wheel：可以 **跳过 env.sh**，改为手动加载（手册 2.1.4 的写法）：
+
+```bash
+module load compilers/gcc/9.3.0
+module load compilers/cuda/11.6
+```
+
+或者在提交作业时临时禁用 `env.sh`（让脚本走 fallback）：
+
+```bash
+PYTORCH_ENV_SH=/nonexistent sbatch scripts/slurm/setup_env.sh
+```
+
 然后用一个最小 Slurm 作业在“有 GPU 的计算节点”上验证：
 
 ```bash

@@ -496,7 +496,6 @@ def run_hf(args, config: ExperimentConfig) -> None:
         model_name_or_path,
         trust_remote_code=args.trust_remote_code,
         torch_dtype=dtype,
-        device_map={"":  device} if device.type == "cuda" else None,  # Direct GPU load
     )
     if added_pad:
         model.resize_token_embeddings(len(tokenizer))
@@ -517,7 +516,8 @@ def run_hf(args, config: ExperimentConfig) -> None:
 
     if dist_info.is_rank0:
         print("Model loaded. Applying LoRA if enabled...", flush=True)
-    # model.to(device) - removed, using device_map above
+    if device.type == "cuda":
+        model = model.to(device)
 
     if dist_info.distributed:
         model = torch.nn.parallel.DistributedDataParallel(

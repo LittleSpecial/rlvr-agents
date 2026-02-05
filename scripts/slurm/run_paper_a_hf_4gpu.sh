@@ -33,15 +33,23 @@ cd "${SLURM_SUBMIT_DIR}"
 module purge
 module load miniforge3/24.1
 # N32-H 手册：CUDA/GCC 模块一般在 compilers/* 下；或直接 source 超算提供的 PyTorch env.sh
-PYTORCH_ENV_SH="${PYTORCH_ENV_SH:-/home/bingxing2/apps/package/pytorch/1.11.0+cu113_cp38/env.sh}"
+# 推荐：选一个与你 Python 版本 (cp310) + 驱动支持的 CUDA 版本匹配的 env.sh。
+# 你集群当前驱动显示 CUDA 11.6，因此优先 cu116；避免 cu118/cu121 以免报 driver/runtime 不兼容。
+PYTORCH_ENV_SH="${PYTORCH_ENV_SH:-/home/bingxing2/apps/package/pytorch/1.13.1+cu116_cp310/env.sh}"
 if [ -f "${PYTORCH_ENV_SH}" ]; then
-  echo "Sourcing PYTORCH_ENV_SH=${PYTORCH_ENV_SH}"
+  echo "Sourcing PYTORCH_ENV_SH=${PYTORCH_ENV_SH} (non-fatal)"
   # shellcheck disable=SC1090
+  set +e
   source "${PYTORCH_ENV_SH}"
-else
-  module load compilers/gcc/9.3.0 2>/dev/null || true
-  module load compilers/cuda/11.3 2>/dev/null || true
+  _SRC_RC=$?
+  set -e
+  if [ ${_SRC_RC} -ne 0 ]; then
+    echo "Warning: source env.sh failed (rc=${_SRC_RC}); falling back to manual modules"
+  fi
 fi
+
+module load compilers/gcc/9.3.0 2>/dev/null || true
+module load compilers/cuda/11.6 2>/dev/null || true
 eval "$(conda shell.bash hook)" 2>/dev/null || true
 conda activate rlvr || source activate rlvr
 

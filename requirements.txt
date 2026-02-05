@@ -8,10 +8,13 @@ pyyaml>=6.0
 # For real LLM training (HF backend)
 torch>=1.11.0
 transformers>=4.36.0
-accelerate>=0.25.0
+# accelerate is optional for this repo's HF backend (we don't use it directly).
+# New accelerate versions require torch>=2.0.0, which may not be available on some clusters (e.g., CUDA 11.6 wheels).
+# accelerate<1.0.0
 peft>=0.7.0  # LoRA
 datasets>=2.16.0
-trl>=0.7.0  # RLHF/PPO
+# trl is optional (not used in the current training scripts)
+# trl>=0.7.0
 
 # For faster inference (optional)
 # vllm>=0.2.7

@@ -31,15 +31,22 @@ module purge
 module load miniforge3/24.1 2>/dev/null || true
 
 # N32-H 手册：优先 source 超算提供的 PyTorch env.sh（里面会 module load compilers/cuda/gcc）
-PYTORCH_ENV_SH="${PYTORCH_ENV_SH:-/home/bingxing2/apps/package/pytorch/1.11.0+cu113_cp38/env.sh}"
+PYTORCH_ENV_SH="${PYTORCH_ENV_SH:-/home/bingxing2/apps/package/pytorch/1.13.1+cu116_cp310/env.sh}"
 if [ -f "${PYTORCH_ENV_SH}" ]; then
-  echo "Sourcing PYTORCH_ENV_SH=${PYTORCH_ENV_SH}"
+  echo "Sourcing PYTORCH_ENV_SH=${PYTORCH_ENV_SH} (non-fatal)"
+  # 某些 env.sh 会尝试加载不存在的 anaconda 模块；失败则回退到手动 module load
+  set +e
   # shellcheck disable=SC1090
   source "${PYTORCH_ENV_SH}"
-else
-  module load compilers/gcc/9.3.0 2>/dev/null || true
-  module load compilers/cuda/11.3 2>/dev/null || true
+  _SRC_RC=$?
+  set -e
+  if [ ${_SRC_RC} -ne 0 ]; then
+    echo "Warning: source env.sh failed (rc=${_SRC_RC}); falling back to manual modules"
+  fi
 fi
+
+module load compilers/gcc/9.3.0 2>/dev/null || true
+module load compilers/cuda/11.6 2>/dev/null || true
 
 eval "$(conda shell.bash hook)" 2>/dev/null || true
 conda activate rlvr 2>/dev/null || source activate rlvr 2>/dev/null || true
