@@ -774,7 +774,9 @@ def run_hf(args, config: ExperimentConfig) -> None:
     if dist_info.is_rank0:
         print("Model loaded. Applying LoRA if enabled...", flush=True)
     if device.type == "cuda":
+        print(f"[Rank {dist_info.rank}] Moving model to {device}...", flush=True)
         model = model.to(device)
+        print(f"[Rank {dist_info.rank}] Model moved to {device}.", flush=True)
 
     # Memory helpers for long sequences + DDP.
     raw_model = model.module if hasattr(model, "module") else model
@@ -796,9 +798,11 @@ def run_hf(args, config: ExperimentConfig) -> None:
                 pass
 
     if dist_info.distributed:
+        print(f"[Rank {dist_info.rank}] Creating DDP wrapper...", flush=True)
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[dist_info.local_rank] if device.type == "cuda" else None
         )
+        print(f"[Rank {dist_info.rank}] DDP wrapper created.", flush=True)
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     if not trainable_params:
