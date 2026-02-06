@@ -49,10 +49,26 @@ class CodeEnv(BaseEnv):
         self._start_time: float = 0.0
         self._total_tokens: int = 0
         self._total_tool_calls: int = 0
+
+    @staticmethod
+    def _safe_timeout(value: Any, default: float) -> float:
+        try:
+            timeout = float(value)
+        except Exception:
+            timeout = float(default)
+        # Never allow non-positive execution timeout.
+        return max(0.1, timeout)
         
     def reset(self, task: Dict[str, Any]) -> Observation:
         """重置环境到新任务"""
         self.clear_cache()
+        default_timeout = self._safe_timeout(self.config.extra.get("default_timeout", 30.0), 30.0)
+        task_timeout_raw = task.get("timeout", default_timeout)
+        task_timeout = self._safe_timeout(task_timeout_raw, default_timeout)
+        # In distributed RL, one very slow sample can stall all ranks at DDP all-reduce.
+        # Use default_timeout as a hard cap by default to avoid NCCL watchdog timeouts.
+        if bool(self.config.extra.get("cap_task_timeout", True)):
+            task_timeout = min(task_timeout, default_timeout)
         self.current_task = CodeTask(
             task_id=task.get("task_id", str(uuid.uuid4())),
             prompt=task["prompt"],
@@ -60,7 +76,7 @@ class CodeEnv(BaseEnv):
             test_code=task.get("test_code", ""),
             expected_output=task.get("expected_output"),
             language=task.get("language", "python"),
-            timeout=task.get("timeout", self.config.extra.get("default_timeout", 30.0)),
+            timeout=task_timeout,
             metadata=task.get("metadata", {}),
         )
         

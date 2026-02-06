@@ -681,6 +681,7 @@ def run_hf(args, config: ExperimentConfig) -> None:
         extra={
             "show_tests": args.show_tests,
             "default_timeout": float(args.task_timeout_seconds),
+            "cap_task_timeout": True,
         },
     )
     env = CodeEnv(env_config) if args.env_type == "code" else SQLEnv(env_config)
@@ -707,6 +708,7 @@ def run_hf(args, config: ExperimentConfig) -> None:
             "failure_replay_ratio": float(args.failure_replay_ratio),
             "max_policy_turns": int(args.max_policy_turns),
             "task_timeout_seconds": float(args.task_timeout_seconds),
+            "cap_task_timeout": True,
         })
 
     # Dataset
@@ -969,8 +971,28 @@ def run_hf(args, config: ExperimentConfig) -> None:
                 state.trajectory = env.get_trajectory()
             trajectories.append(state.trajectory)
 
-        if not sampled_sequences:
-            # Should not happen with max_policy_turns>=1, but keep training robust.
+        local_sample_count = len(sampled_sequences)
+        global_min_sample_count = local_sample_count
+        if dist_info.distributed:
+            import torch.distributed as dist
+
+            sample_count_t = torch.tensor([local_sample_count], device=device, dtype=torch.long)
+            dist.all_reduce(sample_count_t, op=dist.ReduceOp.MIN)
+            global_min_sample_count = int(sample_count_t.item())
+
+        if global_min_sample_count <= 0:
+            # If any rank has no rollout sample, all ranks must skip this step.
+            # Otherwise some ranks call backward(all-reduce) while others do not, which deadlocks DDP.
+            if tracker and dist_info.is_rank0:
+                tracker.log_event(
+                    "train",
+                    "skip step: empty rollout sample on at least one rank",
+                    {
+                        "step": int(step),
+                        "local_sample_count": int(local_sample_count),
+                        "world_size": int(dist_info.world_size),
+                    },
+                )
             continue
 
         pad_id = int(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
