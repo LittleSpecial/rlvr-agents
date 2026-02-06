@@ -56,19 +56,14 @@ class ConflictDetector:
         self.max_tracked_tensors = int(max_tracked_tensors)
         
         self.history: List[ConflictMetrics] = []
-    
-    def compute_group_gradients(
+
+    def select_tracked_parameters(
         self,
         model: nn.Module,
-        group_losses: Dict[int, torch.Tensor],
         *,
         include_param_names: Optional[List[str]] = None,
         param_filter: Optional[Callable[[str, nn.Parameter], bool]] = None,
-    ) -> Dict[int, torch.Tensor]:
-        """
-        计算每个组的梯度
-        """
-        # Pre-select parameters once to avoid iterating model.named_parameters() for every group.
+    ) -> List[Tuple[str, nn.Parameter]]:
         tracked: List[Tuple[str, nn.Parameter]] = []
         for name, param in model.named_parameters():
             if not param.requires_grad:
@@ -79,8 +74,6 @@ class ConflictDetector:
                 continue
             tracked.append((name, param))
 
-        # Default behavior for large models: if caller did not provide an explicit filter,
-        # prioritize adapter-style trainable tensors to reduce memory/time overhead.
         if (
             include_param_names is None
             and param_filter is None
@@ -95,10 +88,28 @@ class ConflictDetector:
             if adapter_only:
                 tracked = adapter_only
 
-        # Optional deterministic downsampling when many tensors are still tracked.
         if self.max_tracked_tensors > 0 and len(tracked) > self.max_tracked_tensors:
             stride = max(1, len(tracked) // self.max_tracked_tensors)
             tracked = tracked[::stride][: self.max_tracked_tensors]
+
+        return tracked
+    
+    def compute_group_gradients(
+        self,
+        model: nn.Module,
+        group_losses: Dict[int, torch.Tensor],
+        *,
+        include_param_names: Optional[List[str]] = None,
+        param_filter: Optional[Callable[[str, nn.Parameter], bool]] = None,
+    ) -> Dict[int, torch.Tensor]:
+        """
+        计算每个组的梯度
+        """
+        tracked = self.select_tracked_parameters(
+            model,
+            include_param_names=include_param_names,
+            param_filter=param_filter,
+        )
 
         params = [p for _, p in tracked]
         group_ids = sorted(group_losses.keys())
