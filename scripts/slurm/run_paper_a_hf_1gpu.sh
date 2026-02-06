@@ -65,25 +65,11 @@ PY
 )"
 echo "torch (wheel): ${TORCH_WHL_VER:-UNKNOWN}"
 
-# Auto-align CUDA/GCC/NCCL module versions with the installed torch wheel tag (cu116/cu118/...)
-if [ -z "${CUDA_MODULE:-}" ] || [ -z "${GCC_MODULE:-}" ]; then
-  TORCH_CU_TAG="$(echo "${TORCH_WHL_VER}" | sed -n 's/.*+cu\\([0-9][0-9][0-9]\\).*/cu\\1/p')"
-  case "${TORCH_CU_TAG}" in
-    cu118)
-      : "${CUDA_MODULE:=compilers/cuda/11.8}"
-      : "${GCC_MODULE:=compilers/gcc/11.3.0}"
-      : "${NCCL_MODULE:=nccl/2.11.4-1_cuda11.8}"
-      ;;
-    cu116)
-      : "${CUDA_MODULE:=compilers/cuda/11.6}"
-      : "${GCC_MODULE:=compilers/gcc/9.3.0}"
-      ;;
-    *)
-      : "${CUDA_MODULE:=compilers/cuda/11.6}"
-      : "${GCC_MODULE:=compilers/gcc/9.3.0}"
-      ;;
-  esac
-fi
+# Fixed cluster defaults (can still be overridden by sbatch --export).
+: "${CUDA_MODULE:=compilers/cuda/11.8}"
+: "${GCC_MODULE:=compilers/gcc/11.3.0}"
+: "${CUDNN_MODULE:=cudnn/8.6.0.163_cuda11.x}"
+: "${NCCL_MODULE:=nccl/2.11.4-1_cuda11.8}"
 
 echo "=== Loading compute modules ==="
 echo "GCC_MODULE=${GCC_MODULE:-}"

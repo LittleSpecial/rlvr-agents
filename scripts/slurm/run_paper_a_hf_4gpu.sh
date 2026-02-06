@@ -37,21 +37,11 @@ export TMPDIR="${TMPDIR:-$HOME/tmp}"
 mkdir -p "${TMPDIR}"
 export PYTHONNOUSERSITE=1
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
-export TORCH_DDP_TIMEOUT_SECONDS="${TORCH_DDP_TIMEOUT_SECONDS:-600}"
+export TORCH_DDP_TIMEOUT_SECONDS="${TORCH_DDP_TIMEOUT_SECONDS:-3600}"
 
 # NCCL settings for PCIe-connected multi-GPU (no InfiniBand)
-# Force NCCL to use shared memory + P2P, skip non-existent IB/RoCE
 export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
-export NCCL_P2P_LEVEL="${NCCL_P2P_LEVEL:-NVL}"        # NVLink if available, else fallback
-export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-0}"      # Keep SHM on
-export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-lo,eth0}"  # Network interfaces for fallback
-export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"               # Print NCCL init info for debugging
-export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-INIT,GRAPH}"
-
-# PyTorch distributed settings
-export TORCH_DISTRIBUTED_DEBUG="${TORCH_DISTRIBUTED_DEBUG:-DETAIL}"
-export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
-export MASTER_PORT="${MASTER_PORT:-29500}"
+export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 
 echo "=== Loading modules (cluster template) ==="
 module purge
@@ -82,25 +72,11 @@ PY
 )"
 echo "torch (wheel): ${TORCH_WHL_VER:-UNKNOWN}"
 
-# Auto-align CUDA/GCC/NCCL module versions with the installed torch wheel tag (cu116/cu118/...)
-if [ -z "${CUDA_MODULE:-}" ] || [ -z "${GCC_MODULE:-}" ] || [ -z "${NCCL_MODULE:-}" ]; then
-  TORCH_CU_TAG="$(echo "${TORCH_WHL_VER}" | sed -n 's/.*+cu\\([0-9][0-9][0-9]\\).*/cu\\1/p')"
-  case "${TORCH_CU_TAG}" in
-    cu118)
-      : "${CUDA_MODULE:=compilers/cuda/11.8}"
-      : "${GCC_MODULE:=compilers/gcc/11.3.0}"
-      : "${NCCL_MODULE:=nccl/2.11.4-1_cuda11.8}"
-      ;;
-    cu116)
-      : "${CUDA_MODULE:=compilers/cuda/11.6}"
-      : "${GCC_MODULE:=compilers/gcc/9.3.0}"
-      ;;
-    *)
-      : "${CUDA_MODULE:=compilers/cuda/11.6}"
-      : "${GCC_MODULE:=compilers/gcc/9.3.0}"
-      ;;
-  esac
-fi
+# Fixed cluster defaults (can still be overridden by sbatch --export).
+: "${CUDA_MODULE:=compilers/cuda/11.8}"
+: "${GCC_MODULE:=compilers/gcc/11.3.0}"
+: "${CUDNN_MODULE:=cudnn/8.6.0.163_cuda11.x}"
+: "${NCCL_MODULE:=nccl/2.11.4-1_cuda11.8}"
 
 echo "=== Loading compute modules ==="
 echo "GCC_MODULE=${GCC_MODULE:-}"
