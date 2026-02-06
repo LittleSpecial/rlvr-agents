@@ -9,6 +9,7 @@ import statistics
 import time
 import json
 import random
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
@@ -65,6 +66,12 @@ def parse_args():
     parser.add_argument("--top_p", type=float, default=1.0, help="(hf) nucleus sampling p")
     parser.add_argument("--max_new_tokens", type=int, default=256, help="(hf) max tokens to generate")
     parser.add_argument("--max_prompt_tokens", type=int, default=1024, help="(hf) truncate prompt to this length")
+    parser.add_argument(
+        "--max_policy_turns",
+        type=int,
+        default=1,
+        help="(hf, code env) max write-test turns per rollout trajectory",
+    )
     parser.add_argument("--dtype", type=str, default="bf16", choices=["bf16", "fp16", "fp32"],
                         help="(hf) model dtype on GPU")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="(hf) gradient clipping")
@@ -336,6 +343,38 @@ def _pass_at_k_from_groups(trajectories: List[Trajectory], k: int) -> float:
         if any(t.r_final > 0.5 for t in ts_k):
             hits += 1
     return hits / len(groups)
+
+
+@dataclass
+class _RolloutState:
+    task: Dict
+    observation: str
+    done: bool = False
+    trajectory: Optional[Trajectory] = None
+    action_count: int = 0
+    latest_feedback: str = ""
+
+
+def _build_code_followup_observation(
+    task: Dict,
+    *,
+    current_code: str,
+    last_feedback: str,
+    show_tests: bool,
+) -> str:
+    """
+    Build a richer multi-turn observation so the model can iteratively refine code.
+    """
+    language = str(task.get("language", "python"))
+    parts: List[str] = [f"Task: {task.get('prompt', '')}"]
+    if current_code:
+        parts.append(f"Current Code:\n```{language}\n{current_code}\n```")
+    if last_feedback:
+        parts.append(f"Last Test Feedback:\n{last_feedback}")
+    test_code = task.get("test_code")
+    if show_tests and isinstance(test_code, str) and test_code:
+        parts.append(f"Test Cases:\n```{language}\n{test_code}\n```")
+    return "\n\n".join(parts).strip()
 
 
 def _toy_grad_vectors(
@@ -657,6 +696,7 @@ def run_hf(args, config: ExperimentConfig) -> None:
             "flat_group_fallback": args.flat_group_fallback,
             "failure_reward_floor": float(args.failure_reward_floor),
             "failure_replay_ratio": float(args.failure_replay_ratio),
+            "max_policy_turns": int(args.max_policy_turns),
         })
 
     # Dataset
@@ -758,10 +798,13 @@ def run_hf(args, config: ExperimentConfig) -> None:
     else:
         sys_prompt = DEFAULT_SYSTEM_PROMPT if args.env_type == "code" else DEFAULT_SQL_SYSTEM_PROMPT
 
+    max_policy_turns = max(1, int(args.max_policy_turns))
+    if args.env_type != "code":
+        max_policy_turns = 1
+
     for step in range(1, args.max_steps + 1):
         # 1) Sample prompts (per-rank batch)
         prompt_tasks: List[Dict] = []
-        prompt_texts: List[str] = []
         replay_quota = 0
         if (
             float(args.failure_replay_ratio) > 0.0
@@ -783,79 +826,154 @@ def run_hf(args, config: ExperimentConfig) -> None:
             task = _clone_task_with_group_id(rec, group_id=group_id)
             prompt_tasks.append(task)
 
+        r = int(args.num_rollouts_per_prompt)
+        rollout_states: List[_RolloutState] = []
+        for task in prompt_tasks:
             obs = env.reset(task)
-            if args.env_type == "code":
-                prompt_texts.append(
-                    build_code_prompt(
-                        obs.content,
-                        tokenizer,
-                        use_chat_template=args.use_chat_template,
-                        system_prompt=sys_prompt,
-                    )
-                )
-            else:
-                prompt_texts.append(
-                    build_sql_prompt(
-                        obs.content,
-                        tokenizer,
-                        use_chat_template=args.use_chat_template,
-                        system_prompt=sys_prompt,
-                    )
-                )
+            for _ in range(r):
+                rollout_states.append(_RolloutState(task=task, observation=obs.content))
 
-        enc = tokenizer(
-            prompt_texts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=int(args.max_prompt_tokens),
-        )
-        input_ids = enc["input_ids"].to(device)
-        attention_mask = enc["attention_mask"].to(device)
-        prompt_lens_base = [int(x) for x in attention_mask.sum(dim=1).tolist()]
-
-        # 2) Generate rollouts
+        # 2) Generate rollouts (supports multi-turn write->test trajectories for code env)
         gen_model = model.module if hasattr(model, "module") else model
         gen_model.eval()
-        with torch.no_grad():
-            sequences = gen_model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                do_sample=True,
-                temperature=float(args.temperature),
-                top_p=float(args.top_p),
-                max_new_tokens=int(args.max_new_tokens),
-                num_return_sequences=int(args.num_rollouts_per_prompt),
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
+        sampled_sequences: List[List[int]] = []
+        sampled_prompt_lens: List[int] = []
+        sampled_state_indices: List[int] = []
+        sampled_turn_indices: List[int] = []
+
+        for _turn in range(max_policy_turns):
+            active_indices = [i for i, st in enumerate(rollout_states) if not st.done]
+            if not active_indices:
+                break
+
+            active_prompts: List[str] = []
+            for idx in active_indices:
+                state = rollout_states[idx]
+                if args.env_type == "code":
+                    active_prompts.append(
+                        build_code_prompt(
+                            state.observation,
+                            tokenizer,
+                            use_chat_template=args.use_chat_template,
+                            system_prompt=sys_prompt,
+                        )
+                    )
+                else:
+                    active_prompts.append(
+                        build_sql_prompt(
+                            state.observation,
+                            tokenizer,
+                            use_chat_template=args.use_chat_template,
+                            system_prompt=sys_prompt,
+                        )
+                    )
+
+            enc = tokenizer(
+                active_prompts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=int(args.max_prompt_tokens),
             )
+            input_ids = enc["input_ids"].to(device)
+            attention_mask = enc["attention_mask"].to(device)
+            prompt_lens = [int(x) for x in attention_mask.sum(dim=1).tolist()]
+
+            with torch.no_grad():
+                generated = gen_model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    do_sample=True,
+                    temperature=float(args.temperature),
+                    top_p=float(args.top_p),
+                    max_new_tokens=int(args.max_new_tokens),
+                    num_return_sequences=1,
+                    pad_token_id=tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
+                )
+
+            for seq, state_idx, p_len in zip(generated, active_indices, prompt_lens):
+                ids = seq.tolist()
+                end = len(ids)
+                if tokenizer.eos_token_id is not None:
+                    try:
+                        end = ids.index(int(tokenizer.eos_token_id), p_len) + 1
+                    except ValueError:
+                        pass
+
+                sampled_sequences.append(ids)
+                sampled_prompt_lens.append(int(p_len))
+                sampled_state_indices.append(int(state_idx))
+                sampled_turn_indices.append(int(rollout_states[state_idx].action_count))
+
+                completion_text = tokenizer.decode(ids[p_len:end], skip_special_tokens=True)
+                content = extract_python_code(completion_text) if args.env_type == "code" else completion_text
+
+                state = rollout_states[state_idx]
+                env.reset(state.task)
+                if state.trajectory is not None:
+                    for prev_step in state.trajectory.steps:
+                        _, _, done_prev, _ = env.step(prev_step.action)
+                        if done_prev:
+                            break
+
+                if args.env_type == "code":
+                    # Mark stochastic policy actions so counterfactual credit can target multi-turn writes.
+                    write_action = Action(
+                        ActionType.CODE_WRITE,
+                        content,
+                        metadata={"logprob": 0.0, "turn_index": int(state.action_count)},
+                    )
+                    env.step(write_action)
+                    obs_test, _, done, _ = env.step(Action(ActionType.TOOL_CALL, "", tool_name="run_tests"))
+                    state.latest_feedback = obs_test.content
+                else:
+                    obs_sql, _, done, _ = env.step(
+                        Action(ActionType.TOOL_CALL, content, tool_name="submit_query", metadata={"logprob": 0.0})
+                    )
+                    state.latest_feedback = obs_sql.content
+
+                trajectory = env.get_trajectory()
+                state.trajectory = trajectory
+                state.action_count += 1
+                state.done = bool(done) or trajectory.length >= int(args.max_trajectory_length)
+                if not state.done:
+                    if args.env_type == "code":
+                        current_code = str((trajectory.metadata or {}).get("final_code", ""))
+                        state.observation = _build_code_followup_observation(
+                            state.task,
+                            current_code=current_code,
+                            last_feedback=state.latest_feedback,
+                            show_tests=bool(args.show_tests),
+                        )
+                    else:
+                        state.observation = state.latest_feedback
+
         gen_model.train()
 
-        r = int(args.num_rollouts_per_prompt)
-        expanded_prompt_lens = [prompt_lens_base[i // r] for i in range(len(prompt_tasks) * r)]
-        expanded_tasks = [prompt_tasks[i // r] for i in range(len(prompt_tasks) * r)]
-
-        # 3) Execute in verifier env
+        # 3) Collect trajectories and rollout samples for RL loss
         trajectories: List[Trajectory] = []
-        for seq, task, p_len in zip(sequences, expanded_tasks, expanded_prompt_lens):
-            ids = seq.tolist()
-            end = len(ids)
-            if tokenizer.eos_token_id is not None:
-                try:
-                    end = ids.index(int(tokenizer.eos_token_id), p_len) + 1
-                except ValueError:
-                    pass
-            completion_text = tokenizer.decode(ids[p_len:end], skip_special_tokens=True)
-            content = extract_python_code(completion_text)
+        for state in rollout_states:
+            if state.trajectory is None:
+                env.reset(state.task)
+                state.trajectory = env.get_trajectory()
+            trajectories.append(state.trajectory)
 
-            env.reset(task)
-            if args.env_type == "code":
-                # Mark this as the stochastic policy action for step-level credit assignment.
-                env.step(Action(ActionType.CODE_WRITE, content, metadata={"logprob": 0.0}))
-                env.step(Action(ActionType.TOOL_CALL, "", tool_name="run_tests"))
-            else:
-                env.step(Action(ActionType.TOOL_CALL, content, tool_name="submit_query", metadata={"logprob": 0.0}))
-            trajectories.append(env.get_trajectory())
+        if not sampled_sequences:
+            # Should not happen with max_policy_turns>=1, but keep training robust.
+            continue
+
+        pad_id = int(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
+        max_seq_len = max(len(ids) for ids in sampled_sequences)
+        sequences = torch.full(
+            (len(sampled_sequences), max_seq_len),
+            fill_value=pad_id,
+            dtype=torch.long,
+            device=device,
+        )
+        for i, ids in enumerate(sampled_sequences):
+            seq_len = len(ids)
+            sequences[i, :seq_len] = torch.tensor(ids, dtype=torch.long, device=device)
 
         # Update failure replay buffer (prompt-level success/failure).
         if float(args.failure_replay_ratio) > 0.0 and args.failure_buffer_size > 0:
@@ -901,10 +1019,11 @@ def run_hf(args, config: ExperimentConfig) -> None:
             flat_group_fallback=args.flat_group_fallback,
         )
 
-        weights: List[float] = []
+        trajectory_policy_weights: List[List[float]] = []
         credit_spreads: List[float] = []
         for traj, adv in zip(trajectories, advantages):
             w = float(adv)
+            step_adv: Optional[List[float]] = None
             if args.use_counterfactual_credit and cf_generator.should_generate_counterfactuals(traj):
                 interventions = cf_generator.generate(traj)
                 cf_results = cf_executor.batch_execute(traj, interventions)
@@ -925,16 +1044,36 @@ def run_hf(args, config: ExperimentConfig) -> None:
                     ),
                 )
                 credit_spreads.append(credit_map.spread)
-
                 step_adv = _to_list(advantage_mapper.map_to_step_advantages(traj, credit_map))
-                lp_steps = [i for i, s in enumerate(traj.steps) if s.logprob is not None]
-                if lp_steps:
-                    credit_weight = sum(step_adv[i] for i in lp_steps) / len(lp_steps)
+
+            lp_steps = [i for i, s in enumerate(traj.steps) if s.logprob is not None]
+            if lp_steps:
+                if step_adv is None:
+                    per_policy = [w for _ in lp_steps]
+                else:
                     if args.credit_fallback_when_zero_adv and abs(w) <= float(args.zero_adv_threshold):
-                        w = float(args.credit_fallback_scale) * float(credit_weight)
+                        per_policy = [float(args.credit_fallback_scale) * float(step_adv[i]) for i in lp_steps]
                     else:
-                        w *= float(credit_weight)
-            weights.append(w)
+                        per_policy = [w * float(step_adv[i]) for i in lp_steps]
+            else:
+                per_policy = [w]
+
+            trajectory_policy_weights.append(per_policy)
+
+        weights: List[float] = []
+        for state_idx, action_idx in zip(sampled_state_indices, sampled_turn_indices):
+            per_policy = trajectory_policy_weights[state_idx]
+            if not per_policy:
+                weights.append(0.0)
+            elif action_idx < len(per_policy):
+                weights.append(float(per_policy[action_idx]))
+            else:
+                weights.append(float(per_policy[-1]))
+        if len(weights) != len(sampled_prompt_lens) or len(weights) != int(sequences.size(0)):
+            raise RuntimeError(
+                "Mismatch between rollout samples and RL weights: "
+                f"weights={len(weights)} prompts={len(sampled_prompt_lens)} seqs={int(sequences.size(0))}"
+            )
 
         # 5) RL loss and update
         optimizer.zero_grad(set_to_none=True)
@@ -945,7 +1084,7 @@ def run_hf(args, config: ExperimentConfig) -> None:
         loss, loss_extra = weighted_rl_loss(
             model,
             sequences.to(device),
-            prompt_lens=expanded_prompt_lens,
+            prompt_lens=sampled_prompt_lens,
             weights=weights,
             eos_token_id=tokenizer.eos_token_id,
             pad_token_id=tokenizer.pad_token_id,
@@ -961,6 +1100,10 @@ def run_hf(args, config: ExperimentConfig) -> None:
             pass_at_1 = _pass_at_k_from_groups(trajectories, k=1)
             pass_at_k = _pass_at_k_from_groups(trajectories, k=r)
             avg_len = sum(t.length for t in trajectories) / max(1, len(trajectories))
+            avg_policy_actions = (
+                sum(sum(1 for s in t.steps if s.logprob is not None) for t in trajectories)
+                / max(1, len(trajectories))
+            )
             avg_credit_spread = (sum(credit_spreads) / len(credit_spreads)) if credit_spreads else 0.0
             mean_reward = sum(reward_values) / max(1, len(reward_values))
             nonzero_weight_ratio = (
@@ -994,6 +1137,7 @@ def run_hf(args, config: ExperimentConfig) -> None:
                             "failure_reward_floor": float(args.failure_reward_floor),
                             "mean_reward": float(reward_mean),
                             "nonzero_weight_ratio": float(nonzero_weight_mean),
+                            "avg_policy_actions": float(avg_policy_actions),
                             "failure_buffer_size": int(len(failure_buffer)),
                             "failure_replay_quota": int(replay_quota),
                             **loss_extra,
@@ -1124,6 +1268,7 @@ def main():
             "flat_group_fallback": args.flat_group_fallback,
             "failure_reward_floor": float(args.failure_reward_floor),
             "failure_replay_ratio": float(args.failure_replay_ratio),
+            "max_policy_turns": int(args.max_policy_turns),
         },
     )
 
