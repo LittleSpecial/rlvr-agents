@@ -79,6 +79,12 @@ def parse_args():
     parser.add_argument("--max_train_samples", type=int, default=None)
     parser.add_argument("--max_eval_samples", type=int, default=None)
     parser.add_argument("--max_trajectory_length", type=int, default=20)
+    parser.add_argument(
+        "--task_timeout_seconds",
+        type=float,
+        default=8.0,
+        help="(code env) per-task timeout cap to avoid long stuck executions under DDP",
+    )
 
     # Multi-skill protocols
     parser.add_argument("--protocol", type=str, default="mixed", choices=["mixed", "sequential"])
@@ -447,7 +453,11 @@ def run_hf(args, config: ExperimentConfig) -> None:
         name=args.env_type,
         max_steps=args.max_trajectory_length,
         seed=args.seed + dist_info.rank,
-        extra={"show_tests": args.show_tests},
+        extra={
+            "show_tests": args.show_tests,
+            "default_timeout": float(args.task_timeout_seconds),
+            "cap_task_timeout": True,
+        },
     )
     env = CodeEnv(env_config) if args.env_type == "code" else SQLEnv(env_config)
 
@@ -542,7 +552,7 @@ def run_hf(args, config: ExperimentConfig) -> None:
         max_tracked_tensors=int(args.max_tracked_tensors),
     )
     surgery = GradientSurgery(
-        method="pcgrad" if args.projection == "pcgrad" else "pcgrad",
+        method="pcgrad" if args.projection == "pcgrad" else "none",
         conflict_threshold=float(args.conflict_threshold),
         normalize=bool(args.normalize_update),
         only_adapter_layers=True,

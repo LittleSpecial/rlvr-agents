@@ -86,6 +86,7 @@ class CreditEstimator:
         # 初始化credit
         step_credits = [0.0] * n_steps
         step_counts = [0] * n_steps
+        step_max_credits: List[Optional[float]] = [None] * n_steps
         
         # 寻找最早成功点
         earliest_success = None
@@ -100,6 +101,15 @@ class CreditEstimator:
                 return float(cf_reward_fn(cf))
             return float(cf.r_final_cf)
 
+        def _accumulate_step_credit(step_idx: int, credit_value: float) -> None:
+            if self.aggregation == "max":
+                prev = step_max_credits[step_idx]
+                if prev is None or abs(float(credit_value)) > abs(float(prev)):
+                    step_max_credits[step_idx] = float(credit_value)
+            else:
+                step_credits[step_idx] += float(credit_value)
+            step_counts[step_idx] += 1
+
         for cf in cf_results:
             if not cf.is_valid:
                 continue
@@ -112,8 +122,7 @@ class CreditEstimator:
                 t = intv.target_step
                 if 0 <= t < n_steps:
                     credit = base_reward - _cf_reward(cf)
-                    step_credits[t] += credit
-                    step_counts[t] += 1
+                    _accumulate_step_credit(t, credit)
             
             elif intv.intervention_type == InterventionType.DELETE_BLOCK:
                 # 删除block：credit分配给block内的步骤
@@ -122,8 +131,7 @@ class CreditEstimator:
                 credit = base_reward - _cf_reward(cf)
                 block_credit = credit / (end - start)
                 for t in range(start, min(end, n_steps)):
-                    step_credits[t] += block_credit
-                    step_counts[t] += 1
+                    _accumulate_step_credit(t, block_credit)
             
             elif intv.intervention_type == InterventionType.TRUNCATE:
                 # 截断：找最早成功点
@@ -137,8 +145,7 @@ class CreditEstimator:
                 t = intv.target_step
                 if 0 <= t < n_steps:
                     credit = base_reward - _cf_reward(cf)
-                    step_credits[t] += credit
-                    step_counts[t] += 1
+                    _accumulate_step_credit(t, credit)
         
         # 聚合
         for t in range(n_steps):
@@ -146,7 +153,7 @@ class CreditEstimator:
                 if self.aggregation == "mean":
                     step_credits[t] /= step_counts[t]
                 elif self.aggregation == "max":
-                    pass  # 已经是累加，取最大需要不同实现
+                    step_credits[t] = float(step_max_credits[t]) if step_max_credits[t] is not None else 0.0
         
         # 如果有最早成功点，将credit集中到该点附近
         if earliest_success is not None:

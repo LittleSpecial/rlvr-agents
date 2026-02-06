@@ -1131,11 +1131,9 @@ def run_hf(args, config: ExperimentConfig) -> None:
             success_rate = sum(t.r_final for t in trajectories) / max(1, len(trajectories))
             pass_at_1 = _pass_at_k_from_groups(trajectories, k=1)
             pass_at_k = _pass_at_k_from_groups(trajectories, k=r)
-            avg_len = sum(t.length for t in trajectories) / max(1, len(trajectories))
-            avg_policy_actions = (
-                sum(sum(1 for s in t.steps if s.logprob is not None) for t in trajectories)
-                / max(1, len(trajectories))
-            )
+            local_len_sum = float(sum(t.length for t in trajectories))
+            local_action_sum = float(sum(sum(1 for s in t.steps if s.logprob is not None) for t in trajectories))
+            local_traj_count = float(len(trajectories))
             avg_credit_spread = (sum(credit_spreads) / len(credit_spreads)) if credit_spreads else 0.0
             mean_reward = sum(reward_values) / max(1, len(reward_values))
             nonzero_weight_ratio = (
@@ -1150,6 +1148,19 @@ def run_hf(args, config: ExperimentConfig) -> None:
             credit_mean = all_reduce_mean(float(avg_credit_spread), dist_info=dist_info)
             reward_mean = all_reduce_mean(float(mean_reward), dist_info=dist_info)
             nonzero_weight_mean = all_reduce_mean(float(nonzero_weight_ratio), dist_info=dist_info)
+            global_len_sum_mean = all_reduce_mean(local_len_sum, dist_info=dist_info)
+            global_action_sum_mean = all_reduce_mean(local_action_sum, dist_info=dist_info)
+            global_traj_count_mean = all_reduce_mean(local_traj_count, dist_info=dist_info)
+            avg_len_global = (
+                float(global_len_sum_mean) / float(global_traj_count_mean)
+                if global_traj_count_mean > 0
+                else 0.0
+            )
+            avg_policy_actions_global = (
+                float(global_action_sum_mean) / float(global_traj_count_mean)
+                if global_traj_count_mean > 0
+                else 0.0
+            )
 
             if tracker:
                 tracker.log_metrics(
@@ -1159,7 +1170,7 @@ def run_hf(args, config: ExperimentConfig) -> None:
                         success_rate=float(success_mean),
                         pass_at_1=float(p1_mean),
                         pass_at_k={r: float(pk_mean)},
-                        avg_trajectory_length=float(avg_len),
+                        avg_trajectory_length=float(avg_len_global),
                         wall_time=float(time.time() - exp_wall_start),
                         avg_credit_spread=float(credit_mean),
                         extra={
@@ -1169,7 +1180,7 @@ def run_hf(args, config: ExperimentConfig) -> None:
                             "failure_reward_floor": float(args.failure_reward_floor),
                             "mean_reward": float(reward_mean),
                             "nonzero_weight_ratio": float(nonzero_weight_mean),
-                            "avg_policy_actions": float(avg_policy_actions),
+                            "avg_policy_actions": float(avg_policy_actions_global),
                             "failure_buffer_size": int(len(failure_buffer)),
                             "failure_replay_quota": int(replay_quota),
                             **loss_extra,
