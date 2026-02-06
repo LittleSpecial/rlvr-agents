@@ -104,6 +104,11 @@ def parse_args():
 
     # Paper A 特定配置
     add_bool_flag("--use_counterfactual_credit", default=True, help="enable counterfactual credit reweighting")
+    add_bool_flag(
+        "--prioritize_high_value_cf",
+        default=True,
+        help="only generate counterfactuals for high-value trajectories (disable for early-stage sparse rewards)",
+    )
     parser.add_argument("--counterfactual_k", type=int, default=4)
     parser.add_argument("--intervention_types", nargs="+", default=["delete", "truncate"])
     parser.add_argument("--credit_normalization", type=str, default="signed",
@@ -149,11 +154,13 @@ def _compute_grpo_advantages(trajectories: List[Trajectory]) -> List[float]:
                 for i in indices:
                     advantages[i] = (rewards[i] - mean) / std
             else:
+                # Flat groups (all fail / all success) provide no relative signal; skip update for stability.
                 for i in indices:
-                    advantages[i] = rewards[i] - 0.5
+                    advantages[i] = 0.0
         else:
             i = indices[0]
-            advantages[i] = rewards[i] - 0.5
+            # Single-sample group has no relative baseline.
+            advantages[i] = 0.0
     return advantages
 
 
@@ -251,6 +258,7 @@ def run_toy(args, config: ExperimentConfig) -> None:
     cf_generator = CounterfactualGenerator(
         intervention_types=args.intervention_types,
         k=args.counterfactual_k,
+        prioritize_high_value=args.prioritize_high_value_cf,
         seed=args.seed,
     )
     cf_executor = CounterfactualExecutor(env, use_cache=True, seed=args.seed)
@@ -260,7 +268,11 @@ def run_toy(args, config: ExperimentConfig) -> None:
     tracker.log_event(
         "components",
         "Paper A components initialized",
-        {"intervention_types": args.intervention_types, "k": args.counterfactual_k},
+        {
+            "intervention_types": args.intervention_types,
+            "k": args.counterfactual_k,
+            "prioritize_high_value_cf": bool(args.prioritize_high_value_cf),
+        },
     )
 
     print(f"Experiment directory: {tracker.experiment_dir}")
@@ -457,6 +469,7 @@ def run_hf(args, config: ExperimentConfig) -> None:
     cf_generator = CounterfactualGenerator(
         intervention_types=args.intervention_types,
         k=args.counterfactual_k,
+        prioritize_high_value=args.prioritize_high_value_cf,
         seed=args.seed + dist_info.rank,
     )
     cf_executor = CounterfactualExecutor(env, use_cache=True, seed=args.seed + dist_info.rank)
@@ -467,6 +480,7 @@ def run_hf(args, config: ExperimentConfig) -> None:
         tracker.log_event("components", "Paper A components initialized", {
             "intervention_types": args.intervention_types,
             "k": args.counterfactual_k,
+            "prioritize_high_value_cf": bool(args.prioritize_high_value_cf),
         })
 
     # Dataset
