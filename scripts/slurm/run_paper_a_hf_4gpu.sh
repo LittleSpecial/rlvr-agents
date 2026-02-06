@@ -37,7 +37,21 @@ export TMPDIR="${TMPDIR:-$HOME/tmp}"
 mkdir -p "${TMPDIR}"
 export PYTHONNOUSERSITE=1
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
-export TORCH_DDP_TIMEOUT_SECONDS="${TORCH_DDP_TIMEOUT_SECONDS:-3600}"
+export TORCH_DDP_TIMEOUT_SECONDS="${TORCH_DDP_TIMEOUT_SECONDS:-600}"
+
+# NCCL settings for PCIe-connected multi-GPU (no InfiniBand)
+# Force NCCL to use shared memory + P2P, skip non-existent IB/RoCE
+export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
+export NCCL_P2P_LEVEL="${NCCL_P2P_LEVEL:-NVL}"        # NVLink if available, else fallback
+export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-0}"      # Keep SHM on
+export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-lo,eth0}"  # Network interfaces for fallback
+export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"               # Print NCCL init info for debugging
+export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-INIT,GRAPH}"
+
+# PyTorch distributed settings
+export TORCH_DISTRIBUTED_DEBUG="${TORCH_DISTRIBUTED_DEBUG:-DETAIL}"
+export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
+export MASTER_PORT="${MASTER_PORT:-29500}"
 
 echo "=== Loading modules (cluster template) ==="
 module purge
