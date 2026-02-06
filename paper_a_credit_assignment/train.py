@@ -10,7 +10,7 @@ import time
 import json
 import random
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 # 添加项目根目录到路径
 sys.path.append(str(Path(__file__).parent.parent))
@@ -113,6 +113,47 @@ def parse_args():
     parser.add_argument("--intervention_types", nargs="+", default=["delete", "truncate"])
     parser.add_argument("--credit_normalization", type=str, default="signed",
                         choices=["signed", "minmax", "zscore", "softmax", "none"])
+    parser.add_argument(
+        "--reward_mode",
+        type=str,
+        default="binary",
+        choices=["binary", "score", "mixed"],
+        help="reward used for GRPO/credit: binary(r_final), score(verifier score), or mixed",
+    )
+    parser.add_argument(
+        "--reward_blend_alpha",
+        type=float,
+        default=0.5,
+        help="for reward_mode=mixed: reward=(1-alpha)*binary + alpha*score",
+    )
+    parser.add_argument(
+        "--failure_reward_floor",
+        type=float,
+        default=0.0,
+        help="if trajectory fails and reward<=0, use this floor reward to avoid all-zero updates",
+    )
+    parser.add_argument(
+        "--flat_group_fallback",
+        type=str,
+        default="batch_centered",
+        choices=["zero", "batch_centered", "raw"],
+        help="fallback advantage when group reward std is zero",
+    )
+    add_bool_flag(
+        "--credit_fallback_when_zero_adv",
+        default=True,
+        help="when group advantage is ~0, directly use credit-weight as update weight",
+    )
+    parser.add_argument("--zero_adv_threshold", type=float, default=1e-8)
+    parser.add_argument("--credit_fallback_scale", type=float, default=1.0)
+    parser.add_argument(
+        "--failure_replay_ratio",
+        type=float,
+        default=0.0,
+        help="fraction of prompts sampled from recent failure buffer (0 disables replay)",
+    )
+    parser.add_argument("--failure_buffer_size", type=int, default=4096)
+    parser.add_argument("--failure_replay_warmup_steps", type=int, default=0)
     add_bool_flag("--log_agop", default=True, help="Log AGOP (Average Gradient Outer Product) stats on toy policy gradients.")
     parser.add_argument("--agop_power_iters", type=int, default=30,
                         help="Power-iteration steps for estimating top AGOP eigenvalue.")
@@ -138,8 +179,82 @@ def _clone_task_with_group_id(task: Dict, *, group_id: str) -> Dict:
     return cloned
 
 
-def _compute_grpo_advantages(trajectories: List[Trajectory]) -> List[float]:
-    rewards = [float(t.r_final) for t in trajectories]
+def _clamp01(x: float) -> float:
+    try:
+        v = float(x)
+    except Exception:
+        return 0.0
+    if not (v == v):  # NaN
+        return 0.0
+    return max(0.0, min(1.0, v))
+
+
+def _trajectory_reward(
+    trajectory: Trajectory,
+    *,
+    mode: str,
+    blend_alpha: float,
+    failure_reward_floor: float = 0.0,
+) -> float:
+    binary = _clamp01(float(trajectory.r_final))
+    score = _clamp01(float(getattr(trajectory.verifier_info, "score", binary)))
+    if mode == "binary":
+        reward = binary
+    elif mode == "score":
+        reward = score
+    else:
+        alpha = max(0.0, min(1.0, float(blend_alpha)))
+        reward = (1.0 - alpha) * binary + alpha * score
+    if binary < 0.5 and reward <= 0.0 and failure_reward_floor != 0.0:
+        reward = float(failure_reward_floor)
+    return float(reward)
+
+
+def _cf_result_reward(
+    cf_result,
+    *,
+    mode: str,
+    blend_alpha: float,
+    failure_reward_floor: float = 0.0,
+) -> float:
+    binary = _clamp01(float(getattr(cf_result, "r_final_cf", 0.0)))
+    score = binary
+    cf_traj = getattr(cf_result, "cf_trajectory", None)
+    if cf_traj is not None and getattr(cf_traj, "verifier_info", None) is not None:
+        score = _clamp01(float(getattr(cf_traj.verifier_info, "score", binary)))
+    if mode == "binary":
+        reward = binary
+    elif mode == "score":
+        reward = score
+    else:
+        alpha = max(0.0, min(1.0, float(blend_alpha)))
+        reward = (1.0 - alpha) * binary + alpha * score
+    if binary < 0.5 and reward <= 0.0 and failure_reward_floor != 0.0:
+        reward = float(failure_reward_floor)
+    return float(reward)
+
+
+def _base_task_id_from_trajectory(trajectory: Trajectory) -> Optional[str]:
+    task_meta = ((trajectory.metadata or {}).get("task") or {}).get("metadata") or {}
+    base_id = task_meta.get("base_task_id")
+    if base_id is None:
+        return None
+    return str(base_id)
+
+
+def _compute_grpo_advantages(
+    trajectories: List[Trajectory],
+    rewards: List[float],
+    *,
+    flat_group_fallback: str = "batch_centered",
+) -> List[float]:
+    if len(trajectories) != len(rewards):
+        raise ValueError("trajectories/rewards length mismatch")
+    if not trajectories:
+        return []
+
+    rewards = [float(r) for r in rewards]
+    batch_mean = statistics.fmean(rewards)
     task_groups: Dict[str, List[int]] = {}
     for i, traj in enumerate(trajectories):
         task_groups.setdefault(traj.task_id, []).append(i)
@@ -154,13 +269,25 @@ def _compute_grpo_advantages(trajectories: List[Trajectory]) -> List[float]:
                 for i in indices:
                     advantages[i] = (rewards[i] - mean) / std
             else:
-                # Flat groups (all fail / all success) provide no relative signal; skip update for stability.
                 for i in indices:
-                    advantages[i] = 0.0
+                    if flat_group_fallback == "zero":
+                        advantages[i] = 0.0
+                    elif flat_group_fallback == "batch_centered":
+                        advantages[i] = rewards[i] - batch_mean
+                    elif flat_group_fallback == "raw":
+                        advantages[i] = rewards[i]
+                    else:
+                        raise ValueError(f"Unknown flat_group_fallback: {flat_group_fallback}")
         else:
             i = indices[0]
-            # Single-sample group has no relative baseline.
-            advantages[i] = 0.0
+            if flat_group_fallback == "zero":
+                advantages[i] = 0.0
+            elif flat_group_fallback == "batch_centered":
+                advantages[i] = rewards[i] - batch_mean
+            elif flat_group_fallback == "raw":
+                advantages[i] = rewards[i]
+            else:
+                raise ValueError(f"Unknown flat_group_fallback: {flat_group_fallback}")
     return advantages
 
 
@@ -272,6 +399,9 @@ def run_toy(args, config: ExperimentConfig) -> None:
             "intervention_types": args.intervention_types,
             "k": args.counterfactual_k,
             "prioritize_high_value_cf": bool(args.prioritize_high_value_cf),
+            "reward_mode": args.reward_mode,
+            "flat_group_fallback": args.flat_group_fallback,
+            "failure_reward_floor": float(args.failure_reward_floor),
         },
     )
 
@@ -308,7 +438,20 @@ def run_toy(args, config: ExperimentConfig) -> None:
                 trajectories.append(traj)
                 chosen_indices.append(a_idx)
 
-        advantages = _compute_grpo_advantages(trajectories)
+        reward_values = [
+            _trajectory_reward(
+                t,
+                mode=args.reward_mode,
+                blend_alpha=args.reward_blend_alpha,
+                failure_reward_floor=args.failure_reward_floor,
+            )
+            for t in trajectories
+        ]
+        advantages = _compute_grpo_advantages(
+            trajectories,
+            reward_values,
+            flat_group_fallback=args.flat_group_fallback,
+        )
 
         weights: List[float] = []
         credit_spreads: List[float] = []
@@ -317,14 +460,32 @@ def run_toy(args, config: ExperimentConfig) -> None:
             if args.use_counterfactual_credit and cf_generator.should_generate_counterfactuals(traj):
                 interventions = cf_generator.generate(traj)
                 cf_results = cf_executor.batch_execute(traj, interventions)
-                credit_map = credit_estimator.estimate(traj, cf_results)
+                credit_map = credit_estimator.estimate(
+                    traj,
+                    cf_results,
+                    base_reward=_trajectory_reward(
+                        traj,
+                        mode=args.reward_mode,
+                        blend_alpha=args.reward_blend_alpha,
+                        failure_reward_floor=args.failure_reward_floor,
+                    ),
+                    cf_reward_fn=lambda cf: _cf_result_reward(
+                        cf,
+                        mode=args.reward_mode,
+                        blend_alpha=args.reward_blend_alpha,
+                        failure_reward_floor=args.failure_reward_floor,
+                    ),
+                )
                 credit_spreads.append(credit_map.spread)
 
                 step_adv = _to_list(advantage_mapper.map_to_step_advantages(traj, credit_map))
                 lp_steps = [i for i, s in enumerate(traj.steps) if s.logprob is not None]
                 if lp_steps:
                     credit_weight = sum(step_adv[i] for i in lp_steps) / len(lp_steps)
-                    w *= float(credit_weight)
+                    if args.credit_fallback_when_zero_adv and abs(w) <= float(args.zero_adv_threshold):
+                        w = float(args.credit_fallback_scale) * float(credit_weight)
+                    else:
+                        w *= float(credit_weight)
             weights.append(w)
 
         agop_extra: Dict[str, float] = {}
@@ -369,7 +530,18 @@ def run_toy(args, config: ExperimentConfig) -> None:
                     avg_trajectory_length=float(avg_len),
                     wall_time=float(time.time() - exp_wall_start),
                     avg_credit_spread=float(avg_credit_spread),
-                    extra=agop_extra,
+                    extra={
+                        **agop_extra,
+                        "reward_mode": args.reward_mode,
+                        "failure_reward_floor": float(args.failure_reward_floor),
+                        "mean_reward": float(sum(reward_values) / max(1, len(reward_values))),
+                        "mean_weight": float(sum(weights) / max(1, len(weights))),
+                        "mean_abs_weight": float(sum(abs(w) for w in weights) / max(1, len(weights))),
+                        "nonzero_weight_ratio": float(
+                            sum(1 for w in weights if abs(w) > float(args.zero_adv_threshold))
+                            / max(1, len(weights))
+                        ),
+                    },
                 )
             )
             tracker.log_event("train", "logged step metrics", update_info)
@@ -481,6 +653,10 @@ def run_hf(args, config: ExperimentConfig) -> None:
             "intervention_types": args.intervention_types,
             "k": args.counterfactual_k,
             "prioritize_high_value_cf": bool(args.prioritize_high_value_cf),
+            "reward_mode": args.reward_mode,
+            "flat_group_fallback": args.flat_group_fallback,
+            "failure_reward_floor": float(args.failure_reward_floor),
+            "failure_replay_ratio": float(args.failure_replay_ratio),
         })
 
     # Dataset
@@ -495,6 +671,10 @@ def run_hf(args, config: ExperimentConfig) -> None:
         eval_records = load_jsonl(eval_path, max_samples=args.max_eval_samples)
 
     rng = random.Random(args.seed + 9973 * dist_info.rank)
+    train_record_by_id: Dict[str, Dict] = {
+        str(rec.get("task_id", f"idx_{i}")): rec for i, rec in enumerate(train_records)
+    }
+    failure_buffer: List[str] = []
 
     # Model / tokenizer
     model_name_or_path = args.model_path or args.model_name
@@ -582,8 +762,22 @@ def run_hf(args, config: ExperimentConfig) -> None:
         # 1) Sample prompts (per-rank batch)
         prompt_tasks: List[Dict] = []
         prompt_texts: List[str] = []
+        replay_quota = 0
+        if (
+            float(args.failure_replay_ratio) > 0.0
+            and step > int(args.failure_replay_warmup_steps)
+            and len(failure_buffer) > 0
+        ):
+            replay_quota = int(round(args.batch_size * float(args.failure_replay_ratio)))
+            replay_quota = max(1, replay_quota)
+            replay_quota = min(int(args.batch_size), replay_quota)
+
         for i in range(args.batch_size):
-            rec = rng.choice(train_records)
+            if i < replay_quota and len(failure_buffer) > 0:
+                base_id = rng.choice(failure_buffer)
+                rec = train_record_by_id.get(base_id, rng.choice(train_records))
+            else:
+                rec = rng.choice(train_records)
             base_id = str(rec.get("task_id", f"idx{i}"))
             group_id = f"{base_id}::s{step}::r{dist_info.rank}::p{i}"
             task = _clone_task_with_group_id(rec, group_id=group_id)
@@ -663,8 +857,49 @@ def run_hf(args, config: ExperimentConfig) -> None:
                 env.step(Action(ActionType.TOOL_CALL, content, tool_name="submit_query", metadata={"logprob": 0.0}))
             trajectories.append(env.get_trajectory())
 
+        # Update failure replay buffer (prompt-level success/failure).
+        if float(args.failure_replay_ratio) > 0.0 and args.failure_buffer_size > 0:
+            group_success: Dict[str, bool] = {}
+            group_base_id: Dict[str, str] = {}
+            for traj in trajectories:
+                gid = str(traj.task_id)
+                group_success[gid] = group_success.get(gid, False) or bool(traj.success)
+                base_id = _base_task_id_from_trajectory(traj)
+                if base_id is not None:
+                    group_base_id[gid] = base_id
+
+            for gid, ok in group_success.items():
+                base_id = group_base_id.get(gid)
+                if not base_id:
+                    continue
+                if ok:
+                    # If task now succeeds, drop one stale failure sample.
+                    try:
+                        failure_buffer.remove(base_id)
+                    except ValueError:
+                        pass
+                else:
+                    failure_buffer.append(base_id)
+
+            if len(failure_buffer) > int(args.failure_buffer_size):
+                failure_buffer = failure_buffer[-int(args.failure_buffer_size):]
+
+        reward_values = [
+            _trajectory_reward(
+                t,
+                mode=args.reward_mode,
+                blend_alpha=args.reward_blend_alpha,
+                failure_reward_floor=args.failure_reward_floor,
+            )
+            for t in trajectories
+        ]
+
         # 4) GRPO-style advantages + optional counterfactual reweighting
-        advantages = _compute_grpo_advantages(trajectories)
+        advantages = _compute_grpo_advantages(
+            trajectories,
+            reward_values,
+            flat_group_fallback=args.flat_group_fallback,
+        )
 
         weights: List[float] = []
         credit_spreads: List[float] = []
@@ -673,14 +908,32 @@ def run_hf(args, config: ExperimentConfig) -> None:
             if args.use_counterfactual_credit and cf_generator.should_generate_counterfactuals(traj):
                 interventions = cf_generator.generate(traj)
                 cf_results = cf_executor.batch_execute(traj, interventions)
-                credit_map = credit_estimator.estimate(traj, cf_results)
+                credit_map = credit_estimator.estimate(
+                    traj,
+                    cf_results,
+                    base_reward=_trajectory_reward(
+                        traj,
+                        mode=args.reward_mode,
+                        blend_alpha=args.reward_blend_alpha,
+                        failure_reward_floor=args.failure_reward_floor,
+                    ),
+                    cf_reward_fn=lambda cf: _cf_result_reward(
+                        cf,
+                        mode=args.reward_mode,
+                        blend_alpha=args.reward_blend_alpha,
+                        failure_reward_floor=args.failure_reward_floor,
+                    ),
+                )
                 credit_spreads.append(credit_map.spread)
 
                 step_adv = _to_list(advantage_mapper.map_to_step_advantages(traj, credit_map))
                 lp_steps = [i for i, s in enumerate(traj.steps) if s.logprob is not None]
                 if lp_steps:
                     credit_weight = sum(step_adv[i] for i in lp_steps) / len(lp_steps)
-                    w *= float(credit_weight)
+                    if args.credit_fallback_when_zero_adv and abs(w) <= float(args.zero_adv_threshold):
+                        w = float(args.credit_fallback_scale) * float(credit_weight)
+                    else:
+                        w *= float(credit_weight)
             weights.append(w)
 
         # 5) RL loss and update
@@ -709,6 +962,10 @@ def run_hf(args, config: ExperimentConfig) -> None:
             pass_at_k = _pass_at_k_from_groups(trajectories, k=r)
             avg_len = sum(t.length for t in trajectories) / max(1, len(trajectories))
             avg_credit_spread = (sum(credit_spreads) / len(credit_spreads)) if credit_spreads else 0.0
+            mean_reward = sum(reward_values) / max(1, len(reward_values))
+            nonzero_weight_ratio = (
+                sum(1 for w in weights if abs(w) > float(args.zero_adv_threshold)) / max(1, len(weights))
+            )
 
             # Distributed mean for scalar metrics
             loss_mean = all_reduce_mean(float(loss.item()), dist_info=dist_info)
@@ -716,6 +973,8 @@ def run_hf(args, config: ExperimentConfig) -> None:
             p1_mean = all_reduce_mean(float(pass_at_1), dist_info=dist_info)
             pk_mean = all_reduce_mean(float(pass_at_k), dist_info=dist_info)
             credit_mean = all_reduce_mean(float(avg_credit_spread), dist_info=dist_info)
+            reward_mean = all_reduce_mean(float(mean_reward), dist_info=dist_info)
+            nonzero_weight_mean = all_reduce_mean(float(nonzero_weight_ratio), dist_info=dist_info)
 
             if tracker:
                 tracker.log_metrics(
@@ -731,6 +990,12 @@ def run_hf(args, config: ExperimentConfig) -> None:
                         extra={
                             "backend": "hf",
                             "world_size": dist_info.world_size,
+                            "reward_mode": args.reward_mode,
+                            "failure_reward_floor": float(args.failure_reward_floor),
+                            "mean_reward": float(reward_mean),
+                            "nonzero_weight_ratio": float(nonzero_weight_mean),
+                            "failure_buffer_size": int(len(failure_buffer)),
+                            "failure_replay_quota": int(replay_quota),
                             **loss_extra,
                         },
                     )
@@ -853,7 +1118,13 @@ def main():
         counterfactual_k=args.counterfactual_k,
         intervention_types=args.intervention_types,
         seed=args.seed,
-        extra={"backend": args.backend},
+        extra={
+            "backend": args.backend,
+            "reward_mode": args.reward_mode,
+            "flat_group_fallback": args.flat_group_fallback,
+            "failure_reward_floor": float(args.failure_reward_floor),
+            "failure_replay_ratio": float(args.failure_replay_ratio),
+        },
     )
 
     if args.backend == "hf":

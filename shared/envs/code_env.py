@@ -9,6 +9,9 @@ import os
 import sys
 import time
 import uuid
+import ast
+import json
+import re
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
@@ -196,20 +199,23 @@ class CodeEnv(BaseEnv):
         if cached_result is not None:
             return cached_result
         
-        result = self._execute_code(full_code)
-        
-        # 解析测试结果
-        verifier_info = self._parse_test_result(result)
+        suite_output = self._execute_assert_suite(self.current_code, self.current_task.test_code)
+        if suite_output is not None:
+            result, verifier_info = suite_output
+        else:
+            result = self._execute_code(full_code)
+            verifier_info = self._parse_test_result(result)
         
         if verifier_info.success:
             obs_content = f"All tests passed! ({verifier_info.passed_tests}/{verifier_info.total_tests})"
-            reward = 1.0
+            reward = float(verifier_info.score)
             done = True
         else:
             obs_content = f"Tests failed ({verifier_info.passed_tests}/{verifier_info.total_tests}).\n"
             if result["stderr"]:
                 obs_content += f"Error:\n{result['stderr']}"
-            reward = 0.0
+            # Dense reward for sparse-feedback settings: keep verifier score even on failure.
+            reward = float(verifier_info.score)
             done = False
         
         obs = Observation(
@@ -226,6 +232,115 @@ class CodeEnv(BaseEnv):
         self.cache_tool_output(cache_key, response)
         
         return response
+
+    def _extract_top_level_asserts(self, test_code: str) -> Optional[Tuple[str, List[str]]]:
+        """
+        Try to split test_code into:
+          - setup/preamble code
+          - a list of top-level assert statements
+        Returns None when no suitable assert suite is found.
+        """
+        try:
+            module = ast.parse(test_code)
+        except SyntaxError:
+            return None
+
+        assert_srcs: List[str] = []
+        preamble_nodes: List[ast.stmt] = []
+        for node in module.body:
+            if isinstance(node, ast.Assert):
+                try:
+                    assert_srcs.append(ast.unparse(node))
+                except Exception:
+                    return None
+            else:
+                preamble_nodes.append(node)
+
+        # Fallback to old executor for single assert / opaque harnesses.
+        if len(assert_srcs) < 2:
+            return None
+
+        try:
+            preamble = ast.unparse(ast.Module(body=preamble_nodes, type_ignores=[])) if preamble_nodes else ""
+        except Exception:
+            return None
+        return preamble, assert_srcs
+
+    def _execute_assert_suite(
+        self,
+        code: str,
+        test_code: str,
+    ) -> Optional[Tuple[Dict[str, Any], VerifierInfo]]:
+        """
+        Execute top-level asserts one-by-one to obtain partial pass ratio.
+        This gives a dense verifier score under sparse binary rewards.
+        """
+        parsed = self._extract_top_level_asserts(test_code)
+        if parsed is None:
+            return None
+        preamble, assert_srcs = parsed
+
+        script_parts: List[str] = [code, "", preamble, ""]
+        script_parts += [
+            "import json",
+            "__passed = 0",
+            "__failed = 0",
+            "__errors = []",
+            f"__assert_srcs = {repr(assert_srcs)}",
+            "for __idx, __src in enumerate(__assert_srcs):",
+            "    try:",
+            "        exec(__src, globals(), globals())",
+            "        __passed += 1",
+            "    except AssertionError as _e:",
+            "        __failed += 1",
+            "        __errors.append(f'assert_{__idx}: {str(_e)}')",
+            "    except Exception as _e:",
+            "        __failed += 1",
+            "        __errors.append(f'assert_{__idx}: {type(_e).__name__}: {_e}')",
+            "print('__ASSERT_SUMMARY__' + json.dumps({",
+            "    'passed': __passed,",
+            "    'failed': __failed,",
+            "    'total': __passed + __failed,",
+            "    'errors': __errors[:20],",
+            "}))",
+        ]
+        harness = "\n".join(part for part in script_parts if part is not None)
+        result = self._execute_code(harness)
+
+        marker = "__ASSERT_SUMMARY__"
+        summary_line = None
+        for line in result.get("stdout", "").splitlines()[::-1]:
+            if line.startswith(marker):
+                summary_line = line[len(marker):]
+                break
+        if summary_line is None:
+            return None
+
+        try:
+            summary = json.loads(summary_line)
+            passed = int(summary.get("passed", 0))
+            total = int(summary.get("total", 0))
+            failed = int(summary.get("failed", max(0, total - passed)))
+            errors = list(summary.get("errors", []))
+        except Exception:
+            return None
+
+        score = (float(passed) / float(total)) if total > 0 else 0.0
+        verifier_info = VerifierInfo(
+            success=(failed == 0 and total > 0),
+            score=score,
+            error_message=("; ".join(errors[:5]) if failed > 0 else None),
+            error_type=("test_failure" if failed > 0 else None),
+            passed_tests=passed,
+            total_tests=total,
+        )
+
+        # Remove summary marker from displayed stdout for cleaner logs.
+        cleaned_stdout_lines = [
+            line for line in result.get("stdout", "").splitlines() if not line.startswith(marker)
+        ]
+        result["stdout"] = "\n".join(cleaned_stdout_lines).strip()
+        return result, verifier_info
     
     def _execute_code(self, code: str) -> Dict[str, Any]:
         """执行代码"""
@@ -275,8 +390,7 @@ class CodeEnv(BaseEnv):
     
     def _parse_test_result(self, result: Dict[str, Any]) -> VerifierInfo:
         """解析测试结果"""
-        # 简单的测试结果解析
-        # 实际使用时可以解析pytest/unittest的输出
+        # Fast-path success
         if result["success"]:
             return VerifierInfo(
                 success=True,
@@ -284,15 +398,37 @@ class CodeEnv(BaseEnv):
                 passed_tests=1,
                 total_tests=1
             )
-        else:
+
+        # Best-effort parse for pytest/unittest summaries (dense score on failures).
+        text = f"{result.get('stdout', '')}\n{result.get('stderr', '')}"
+        passed = 0
+        failed = 0
+        m_pass = re.search(r"(\d+)\s+passed", text)
+        m_fail = re.search(r"(\d+)\s+failed", text)
+        if m_pass:
+            passed = int(m_pass.group(1))
+        if m_fail:
+            failed = int(m_fail.group(1))
+        total = passed + failed
+
+        if total > 0:
             return VerifierInfo(
-                success=False,
-                score=0.0,
-                error_message=result["stderr"],
-                error_type="test_failure",
-                passed_tests=0,
-                total_tests=1
+                success=(failed == 0),
+                score=float(passed) / float(total),
+                error_message=result.get("stderr"),
+                error_type=("test_failure" if failed > 0 else None),
+                passed_tests=passed,
+                total_tests=total,
             )
+
+        return VerifierInfo(
+            success=False,
+            score=0.0,
+            error_message=result.get("stderr"),
+            error_type="test_failure",
+            passed_tests=0,
+            total_tests=1,
+        )
     
     def verify(self) -> VerifierInfo:
         """验证当前代码是否通过所有测试"""

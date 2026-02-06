@@ -5,7 +5,7 @@ Credit Estimator
 
 import math
 import statistics
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 from dataclasses import dataclass
 
 from shared.envs.base import Trajectory
@@ -70,7 +70,10 @@ class CreditEstimator:
     def estimate(
         self,
         trajectory: Trajectory,
-        cf_results: List[CounterfactualResult]
+        cf_results: List[CounterfactualResult],
+        *,
+        base_reward: Optional[float] = None,
+        cf_reward_fn: Optional[Callable[[CounterfactualResult], float]] = None,
     ) -> CreditMap:
         """
         从反事实结果估计credit
@@ -87,6 +90,16 @@ class CreditEstimator:
         # 寻找最早成功点
         earliest_success = None
         
+        if base_reward is None:
+            base_reward = float(trajectory.r_final)
+        else:
+            base_reward = float(base_reward)
+
+        def _cf_reward(cf: CounterfactualResult) -> float:
+            if cf_reward_fn is not None:
+                return float(cf_reward_fn(cf))
+            return float(cf.r_final_cf)
+
         for cf in cf_results:
             if not cf.is_valid:
                 continue
@@ -98,7 +111,7 @@ class CreditEstimator:
                 # 删除单步：credit = 原始reward - 反事实reward
                 t = intv.target_step
                 if 0 <= t < n_steps:
-                    credit = trajectory.r_final - cf.r_final_cf
+                    credit = base_reward - _cf_reward(cf)
                     step_credits[t] += credit
                     step_counts[t] += 1
             
@@ -106,7 +119,7 @@ class CreditEstimator:
                 # 删除block：credit分配给block内的步骤
                 start = intv.target_step
                 end = intv.end_step or (start + 1)
-                credit = trajectory.r_final - cf.r_final_cf
+                credit = base_reward - _cf_reward(cf)
                 block_credit = credit / (end - start)
                 for t in range(start, min(end, n_steps)):
                     step_credits[t] += block_credit
@@ -123,7 +136,7 @@ class CreditEstimator:
                 # 替换：credit = 原始reward - 反事实reward
                 t = intv.target_step
                 if 0 <= t < n_steps:
-                    credit = trajectory.r_final - cf.r_final_cf
+                    credit = base_reward - _cf_reward(cf)
                     step_credits[t] += credit
                     step_counts[t] += 1
         

@@ -42,12 +42,18 @@ class ConflictDetector:
         num_groups: int,
         conflict_threshold: float = 0.0,  # cos < threshold 视为冲突
         track_history: bool = True,
-        history_window: int = 100
+        history_window: int = 100,
+        prefer_adapter_params: bool = True,
+        adapter_name_hints: Optional[List[str]] = None,
+        max_tracked_tensors: int = 0,
     ):
         self.num_groups = num_groups
         self.conflict_threshold = conflict_threshold
         self.track_history = track_history
         self.history_window = history_window
+        self.prefer_adapter_params = bool(prefer_adapter_params)
+        self.adapter_name_hints = list(adapter_name_hints or ["lora_", "adapter", "ia3", "prefix"])
+        self.max_tracked_tensors = int(max_tracked_tensors)
         
         self.history: List[ConflictMetrics] = []
     
@@ -72,6 +78,27 @@ class ConflictDetector:
             if param_filter is not None and not param_filter(name, param):
                 continue
             tracked.append((name, param))
+
+        # Default behavior for large models: if caller did not provide an explicit filter,
+        # prioritize adapter-style trainable tensors to reduce memory/time overhead.
+        if (
+            include_param_names is None
+            and param_filter is None
+            and self.prefer_adapter_params
+            and tracked
+        ):
+            adapter_only = [
+                (name, param)
+                for name, param in tracked
+                if any(h in name for h in self.adapter_name_hints)
+            ]
+            if adapter_only:
+                tracked = adapter_only
+
+        # Optional deterministic downsampling when many tensors are still tracked.
+        if self.max_tracked_tensors > 0 and len(tracked) > self.max_tracked_tensors:
+            stride = max(1, len(tracked) // self.max_tracked_tensors)
+            tracked = tracked[::stride][: self.max_tracked_tensors]
 
         params = [p for _, p in tracked]
         group_ids = sorted(group_losses.keys())

@@ -240,6 +240,8 @@ class CounterfactualExecutor:
             else:
                 # 重新执行并验证
                 r_final_cf, verifier_info = self._replay_and_verify(cf_trajectory)
+                cf_trajectory.r_final = float(r_final_cf)
+                cf_trajectory.verifier_info = verifier_info
                 
                 result = CounterfactualResult(
                     base_trajectory_id=trajectory.trajectory_id,
