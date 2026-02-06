@@ -804,10 +804,12 @@ def run_hf(args, config: ExperimentConfig) -> None:
         )
         print(f"[Rank {dist_info.rank}] DDP wrapper created.", flush=True)
 
+    print(f"[Rank {dist_info.rank}] Creating optimizer...", flush=True)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     if not trainable_params:
         raise RuntimeError("No trainable parameters (did LoRA attach correctly?)")
     optimizer = torch.optim.AdamW(trainable_params, lr=float(args.learning_rate))
+    print(f"[Rank {dist_info.rank}] Optimizer created.", flush=True)
 
     if args.system_prompt is not None:
         sys_prompt = args.system_prompt
@@ -818,7 +820,10 @@ def run_hf(args, config: ExperimentConfig) -> None:
     if args.env_type != "code":
         max_policy_turns = 1
 
+    print(f"[Rank {dist_info.rank}] Entering training loop...", flush=True)
     for step in range(1, args.max_steps + 1):
+        if dist_info.is_rank0 and step == 1:
+            print(f"[Rank 0] Step 1 started.", flush=True)
         # 1) Sample prompts (per-rank batch)
         prompt_tasks: List[Dict] = []
         replay_quota = 0
