@@ -101,6 +101,12 @@ def parse_args():
     # 环境配置
     parser.add_argument("--env_type", type=str, default="code", choices=["code", "sql"])
     parser.add_argument("--max_trajectory_length", type=int, default=20)
+    parser.add_argument(
+        "--task_timeout_seconds",
+        type=float,
+        default=8.0,
+        help="(code env) per-run test execution timeout to avoid DDP straggler stalls",
+    )
     add_bool_flag("--show_tests", default=True, help="(code env) whether to show unit tests in the observation")
     parser.add_argument("--train_dataset", type=str, default=None,
                         help="(hf) JSONL dataset path for training (CodeEnv schema)")
@@ -672,7 +678,10 @@ def run_hf(args, config: ExperimentConfig) -> None:
         name=args.env_type,
         max_steps=args.max_trajectory_length,
         seed=args.seed + dist_info.rank,
-        extra={"show_tests": args.show_tests},
+        extra={
+            "show_tests": args.show_tests,
+            "default_timeout": float(args.task_timeout_seconds),
+        },
     )
     env = CodeEnv(env_config) if args.env_type == "code" else SQLEnv(env_config)
 
@@ -697,6 +706,7 @@ def run_hf(args, config: ExperimentConfig) -> None:
             "failure_reward_floor": float(args.failure_reward_floor),
             "failure_replay_ratio": float(args.failure_replay_ratio),
             "max_policy_turns": int(args.max_policy_turns),
+            "task_timeout_seconds": float(args.task_timeout_seconds),
         })
 
     # Dataset
@@ -1269,6 +1279,7 @@ def main():
             "failure_reward_floor": float(args.failure_reward_floor),
             "failure_replay_ratio": float(args.failure_replay_ratio),
             "max_policy_turns": int(args.max_policy_turns),
+            "task_timeout_seconds": float(args.task_timeout_seconds),
         },
     )
 

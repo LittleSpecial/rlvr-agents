@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from typing import Any, List, Optional
+from datetime import timedelta
 
 
 @dataclass(frozen=True)
@@ -38,7 +39,12 @@ def init_distributed() -> DistInfo:
         raise RuntimeError("torch.distributed is not available but WORLD_SIZE>1")
 
     if not dist.is_initialized():
-        dist.init_process_group(backend="nccl", init_method="env://")
+        timeout_s = int(os.environ.get("TORCH_DDP_TIMEOUT_SECONDS", "1800"))
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            timeout=timedelta(seconds=max(60, timeout_s)),
+        )
 
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
@@ -84,4 +90,3 @@ def barrier(*, dist_info: DistInfo) -> None:
     import torch.distributed as dist
 
     dist.barrier()
-

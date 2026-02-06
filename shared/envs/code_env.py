@@ -60,7 +60,7 @@ class CodeEnv(BaseEnv):
             test_code=task.get("test_code", ""),
             expected_output=task.get("expected_output"),
             language=task.get("language", "python"),
-            timeout=task.get("timeout", 30.0),
+            timeout=task.get("timeout", self.config.extra.get("default_timeout", 30.0)),
             metadata=task.get("metadata", {}),
         )
         
