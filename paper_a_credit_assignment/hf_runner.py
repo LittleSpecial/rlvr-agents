@@ -40,7 +40,7 @@ def _rank_print(dist_info, message: str, *, all_ranks: bool = False) -> None:
         print(f"{prefix}{message}", flush=True)
 
 
-def _evaluate_pass_at_1(
+def _evaluate_heldout_metrics(
     *,
     model,
     tokenizer,
@@ -85,38 +85,38 @@ def _evaluate_pass_at_1(
                 )
             )
 
+    sample_k = max(1, int(getattr(args, "eval_sample_k", 1)))
     if not eval_prompts:
-        return {"pass_at_1": 0.0, "n": 0.0}
+        return {
+            "pass_at_1": 0.0,
+            "n": 0.0,
+            "greedy_pass_at_1_strict": 0.0,
+            "greedy_mean_score": 0.0,
+            "sampled_pass_at_k_strict": 0.0,
+            "sampled_mean_score": 0.0,
+            "eval_sample_k": float(sample_k),
+        }
 
     import torch
 
     device = next(model.parameters()).device
-    enc = tokenizer(
-        eval_prompts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=int(args.max_prompt_tokens),
-    )
-    in_ids = enc["input_ids"].to(device)
-    attn = enc["attention_mask"].to(device)
-    p_lens = [int(x) for x in attn.sum(dim=1).tolist()]
-
     gen_model = model.module if hasattr(model, "module") else model
     gen_model.eval()
-    with torch.no_grad():
-        seqs = gen_model.generate(
-            input_ids=in_ids,
-            attention_mask=attn,
-            do_sample=False,
-            max_new_tokens=int(args.max_new_tokens),
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
-    gen_model.train()
 
-    succ = 0.0
-    for seq, task, p_len in zip(seqs, eval_tasks, p_lens):
+    def _encode(prompts: List[str]):
+        enc_local = tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=int(args.max_prompt_tokens),
+        )
+        in_ids_local = enc_local["input_ids"].to(device)
+        attn_local = enc_local["attention_mask"].to(device)
+        p_lens_local = [int(x) for x in attn_local.sum(dim=1).tolist()]
+        return in_ids_local, attn_local, p_lens_local
+
+    def _decode_completion(seq, p_len: int) -> str:
         ids = seq.tolist()
         end = len(ids)
         if tokenizer.eos_token_id is not None:
@@ -124,19 +124,98 @@ def _evaluate_pass_at_1(
                 end = ids.index(int(tokenizer.eos_token_id), p_len) + 1
             except ValueError:
                 pass
-
         completion_text = tokenizer.decode(ids[p_len:end], skip_special_tokens=True)
-        content = extract_python_code(completion_text) if args.env_type == "code" else completion_text
+        return extract_python_code(completion_text) if args.env_type == "code" else completion_text
+
+    def _run_eval_task(task: Dict, content: str) -> Dict[str, float]:
         env.reset(task)
         if args.env_type == "code":
             env.step(Action(ActionType.CODE_WRITE, content))
-            _, r, _, _ = env.step(Action(ActionType.TOOL_CALL, "", tool_name="run_tests"))
+            _, r, done, _ = env.step(Action(ActionType.TOOL_CALL, "", tool_name="run_tests"))
         else:
-            _, r, _, _ = env.step(Action(ActionType.TOOL_CALL, content, tool_name="submit_query"))
-        succ += float(r)
+            _, r, done, _ = env.step(Action(ActionType.TOOL_CALL, content, tool_name="submit_query"))
+        score = float(r)
+        strict = 1.0 if (bool(done) and score >= 1.0 - 1e-8) else 0.0
+        return {"score": score, "strict": strict}
 
-    pass1 = succ / max(1.0, float(len(eval_tasks)))
-    return {"pass_at_1": float(pass1), "n": float(len(eval_tasks))}
+    greedy_scores: List[float] = []
+    greedy_strict: List[float] = []
+    in_ids, attn, p_lens = _encode(eval_prompts)
+    with torch.no_grad():
+        greedy_seqs = gen_model.generate(
+            input_ids=in_ids,
+            attention_mask=attn,
+            do_sample=False,
+            max_new_tokens=int(args.max_new_tokens),
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+
+    for seq, task, p_len in zip(greedy_seqs, eval_tasks, p_lens):
+        content = _decode_completion(seq, p_len)
+        out = _run_eval_task(task, content)
+        greedy_scores.append(out["score"])
+        greedy_strict.append(out["strict"])
+
+    sampled_pass_at_k_strict = 0.0
+    sampled_mean_score = 0.0
+    if sample_k > 1:
+        sampled_prompts: List[str] = []
+        sampled_task_indices: List[int] = []
+        for task_idx, prompt in enumerate(eval_prompts):
+            for _ in range(sample_k):
+                sampled_prompts.append(prompt)
+                sampled_task_indices.append(task_idx)
+
+        sin_ids, sattn, sp_lens = _encode(sampled_prompts)
+        with torch.no_grad():
+            sampled_seqs = gen_model.generate(
+                input_ids=sin_ids,
+                attention_mask=sattn,
+                do_sample=True,
+                temperature=float(args.temperature),
+                top_p=float(args.top_p),
+                max_new_tokens=int(args.max_new_tokens),
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+            )
+
+        sampled_task_scores: List[List[float]] = [[] for _ in eval_tasks]
+        sampled_task_strict: List[List[float]] = [[] for _ in eval_tasks]
+        for seq, task_idx, p_len in zip(sampled_seqs, sampled_task_indices, sp_lens):
+            task = eval_tasks[int(task_idx)]
+            content = _decode_completion(seq, p_len)
+            out = _run_eval_task(task, content)
+            sampled_task_scores[int(task_idx)].append(out["score"])
+            sampled_task_strict[int(task_idx)].append(out["strict"])
+
+        sampled_all_scores = [v for one in sampled_task_scores for v in one]
+        sampled_mean_score = (
+            float(sum(sampled_all_scores) / max(1.0, float(len(sampled_all_scores))))
+            if sampled_all_scores
+            else 0.0
+        )
+        sampled_pass_at_k_strict = float(
+            sum(1.0 for one in sampled_task_strict if any(v > 0.5 for v in one)) / max(1.0, float(len(eval_tasks)))
+        )
+    else:
+        sampled_mean_score = float(sum(greedy_scores) / max(1.0, float(len(greedy_scores))))
+        sampled_pass_at_k_strict = float(sum(greedy_strict) / max(1.0, float(len(greedy_strict))))
+
+    gen_model.train()
+
+    greedy_mean_score = float(sum(greedy_scores) / max(1.0, float(len(greedy_scores))))
+    greedy_pass_at_1_strict = float(sum(greedy_strict) / max(1.0, float(len(greedy_strict))))
+    return {
+        # Backward-compat alias. Historically this field mixed score semantics.
+        "pass_at_1": greedy_pass_at_1_strict,
+        "n": float(len(eval_tasks)),
+        "greedy_pass_at_1_strict": greedy_pass_at_1_strict,
+        "greedy_mean_score": greedy_mean_score,
+        "sampled_pass_at_k_strict": sampled_pass_at_k_strict,
+        "sampled_mean_score": sampled_mean_score,
+        "eval_sample_k": float(sample_k),
+    }
 
 
 def run_hf(args, config: ExperimentConfig) -> None:
@@ -254,6 +333,7 @@ def run_hf(args, config: ExperimentConfig) -> None:
                 "guard_all_negative_batch": bool(args.guard_all_negative_batch),
                 "all_negative_reward_span_threshold": float(args.all_negative_reward_span_threshold),
                 "max_policy_turns": int(args.max_policy_turns),
+                "eval_sample_k": int(max(1, int(args.eval_sample_k))),
                 "task_timeout_seconds": float(args.task_timeout_seconds),
                 "cap_task_timeout": True,
                 "sync_eval_and_save": bool(args.sync_eval_and_save),
@@ -837,7 +917,7 @@ def run_hf(args, config: ExperimentConfig) -> None:
                 barrier(dist_info=dist_info)
 
             if tracker and need_eval:
-                eval_res = _evaluate_pass_at_1(
+                eval_res = _evaluate_heldout_metrics(
                     model=model,
                     tokenizer=tokenizer,
                     env=env,
@@ -851,7 +931,17 @@ def run_hf(args, config: ExperimentConfig) -> None:
                 tracker.log_event(
                     "eval",
                     "eval checkpoint",
-                    {"step": step, "pass_at_1": eval_res["pass_at_1"], "n": int(eval_res["n"])},
+                    {
+                        "step": step,
+                        # Backward-compat alias: now strict greedy pass@1.
+                        "pass_at_1": float(eval_res["pass_at_1"]),
+                        "n": int(eval_res["n"]),
+                        "greedy_pass_at_1_strict": float(eval_res["greedy_pass_at_1_strict"]),
+                        "greedy_mean_score": float(eval_res["greedy_mean_score"]),
+                        "sampled_pass_at_k_strict": float(eval_res["sampled_pass_at_k_strict"]),
+                        "sampled_mean_score": float(eval_res["sampled_mean_score"]),
+                        "eval_sample_k": int(eval_res["eval_sample_k"]),
+                    },
                 )
 
             if tracker and need_save:

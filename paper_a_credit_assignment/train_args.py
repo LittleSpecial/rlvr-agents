@@ -73,6 +73,12 @@ def parse_args():
     )
     parser.add_argument("--save_interval", type=int, default=500, help="(hf) save checkpoint every N steps")
     parser.add_argument("--eval_tasks", type=int, default=64, help="(hf) number of eval tasks per checkpoint")
+    parser.add_argument(
+        "--eval_sample_k",
+        type=int,
+        default=4,
+        help="(hf) sampled decoding count per eval task for pass@k-style eval (<=1 disables sampled eval)",
+    )
     add_bool_flag(
         "--require_cuda",
         default=True,
