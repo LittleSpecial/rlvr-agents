@@ -12,7 +12,6 @@ sys.path.append(str(Path(__file__).parent.parent))
 from shared.experiment_tracking import ExperimentConfig
 
 from paper_a_credit_assignment.hf_runner import run_hf
-from paper_a_credit_assignment.toy_runner import run_toy
 from paper_a_credit_assignment.train_args import parse_args
 
 
@@ -24,7 +23,7 @@ def _build_experiment_config(args) -> ExperimentConfig:
         model_name=str(args.model_path or args.model_name),
         use_lora=args.use_lora,
         lora_rank=args.lora_rank,
-        algorithm=("TOY_PG" if args.backend == "toy" else "GRPO"),
+        algorithm="GRPO",
         learning_rate=args.learning_rate,
         batch_size=args.batch_size,
         max_steps=args.max_steps,
@@ -35,7 +34,7 @@ def _build_experiment_config(args) -> ExperimentConfig:
         intervention_types=args.intervention_types,
         seed=args.seed,
         extra={
-            "backend": args.backend,
+            "backend": "hf",
             "reward_mode": args.reward_mode,
             "flat_group_fallback": args.flat_group_fallback,
             "failure_reward_floor": float(args.failure_reward_floor),
@@ -55,11 +54,7 @@ def _build_experiment_config(args) -> ExperimentConfig:
 def main() -> None:
     args = parse_args()
     config = _build_experiment_config(args)
-
-    if args.backend == "hf":
-        run_hf(args, config)
-    else:
-        run_toy(args, config)
+    run_hf(args, config)
 
 
 if __name__ == "__main__":
