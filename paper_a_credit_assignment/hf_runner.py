@@ -249,6 +249,10 @@ def run_hf(args, config: ExperimentConfig) -> None:
                 "failure_reward_floor": float(args.failure_reward_floor),
                 "failure_replay_ratio": float(args.failure_replay_ratio),
                 "failure_buffer_unique": bool(args.failure_buffer_unique),
+                "replay_min_success_ema": float(args.replay_min_success_ema),
+                "replay_ema_alpha": float(args.replay_ema_alpha),
+                "guard_all_negative_batch": bool(args.guard_all_negative_batch),
+                "all_negative_reward_span_threshold": float(args.all_negative_reward_span_threshold),
                 "max_policy_turns": int(args.max_policy_turns),
                 "task_timeout_seconds": float(args.task_timeout_seconds),
                 "cap_task_timeout": True,
@@ -364,6 +368,9 @@ def run_hf(args, config: ExperimentConfig) -> None:
         max_policy_turns = 1
 
     heartbeat_interval = int(args.heartbeat_interval)
+    replay_success_ema: Optional[float] = None
+    replay_ema_alpha = max(0.0, min(1.0, float(args.replay_ema_alpha)))
+    replay_min_success_ema = max(0.0, min(1.0, float(args.replay_min_success_ema)))
     _rank_print(dist_info, "Entering training loop...")
 
     for step in range(1, args.max_steps + 1):
@@ -375,14 +382,18 @@ def run_hf(args, config: ExperimentConfig) -> None:
         try:
             prompt_tasks: List[Dict] = []
             replay_quota = 0
+            replay_gate_blocked = False
             if (
                 float(args.failure_replay_ratio) > 0.0
                 and step > int(args.failure_replay_warmup_steps)
                 and len(failure_buffer) > 0
             ):
-                replay_quota = int(round(args.batch_size * float(args.failure_replay_ratio)))
-                replay_quota = max(1, replay_quota)
-                replay_quota = min(int(args.batch_size), replay_quota)
+                if replay_success_ema is not None and replay_success_ema < replay_min_success_ema:
+                    replay_gate_blocked = True
+                else:
+                    replay_quota = int(round(args.batch_size * float(args.failure_replay_ratio)))
+                    replay_quota = max(1, replay_quota)
+                    replay_quota = min(int(args.batch_size), replay_quota)
 
             for i in range(args.batch_size):
                 if i < replay_quota and len(failure_buffer) > 0:
@@ -621,6 +632,14 @@ def run_hf(args, config: ExperimentConfig) -> None:
                 )
                 for t in trajectories
             ]
+            step_success_rate = sum(t.r_final for t in trajectories) / max(1, len(trajectories))
+            step_success_rate_mean = all_reduce_mean(float(step_success_rate), dist_info=dist_info)
+            if replay_success_ema is None:
+                replay_success_ema = float(step_success_rate_mean)
+            else:
+                replay_success_ema = (1.0 - replay_ema_alpha) * replay_success_ema + replay_ema_alpha * float(
+                    step_success_rate_mean
+                )
 
             advantages = compute_grpo_advantages(
                 trajectories,
@@ -693,6 +712,14 @@ def run_hf(args, config: ExperimentConfig) -> None:
                     f"weights={len(weights)} prompts={len(sampled_prompt_lens)} seqs={int(sequences.size(0))}"
                 )
 
+            reward_span = (max(reward_values) - min(reward_values)) if reward_values else 0.0
+            all_non_positive_weights = bool(weights) and all(w <= float(args.zero_adv_threshold) for w in weights)
+            all_negative_guard_triggered = bool(args.guard_all_negative_batch) and (
+                all_non_positive_weights and reward_span <= float(args.all_negative_reward_span_threshold)
+            )
+            if all_negative_guard_triggered:
+                weights = [0.0 for _ in weights]
+
             optimizer.zero_grad(set_to_none=True)
             mb = int(args.rl_microbatch_size)
             if mb <= 0:
@@ -706,14 +733,25 @@ def run_hf(args, config: ExperimentConfig) -> None:
                 pad_token_id=tokenizer.pad_token_id,
                 micro_batch_size=mb,
             )
-            loss.backward()
-            if args.grad_clip and args.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(trainable_params, float(args.grad_clip))
-            optimizer.step()
+            local_max_abs_weight = max((abs(w) for w in weights), default=0.0)
+            global_max_abs_weight = float(local_max_abs_weight)
+            if dist_info.distributed:
+                import torch.distributed as dist
+
+                max_w_t = torch.tensor([global_max_abs_weight], device=device, dtype=torch.float32)
+                dist.all_reduce(max_w_t, op=dist.ReduceOp.MAX)
+                global_max_abs_weight = float(max_w_t.item())
+            skip_optimizer_step = global_max_abs_weight <= float(args.zero_adv_threshold)
+
+            if not skip_optimizer_step:
+                loss.backward()
+                if args.grad_clip and args.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(trainable_params, float(args.grad_clip))
+                optimizer.step()
             update_end = time.time()
 
             if step % args.log_interval == 0:
-                success_rate = sum(t.r_final for t in trajectories) / max(1, len(trajectories))
+                success_rate = step_success_rate
                 pass_at_1 = pass_at_k_from_groups(trajectories, k=1)
                 pass_at_k = pass_at_k_from_groups(trajectories, k=r)
                 local_len_sum = float(sum(t.length for t in trajectories))
@@ -771,8 +809,14 @@ def run_hf(args, config: ExperimentConfig) -> None:
                                     len(failure_buffer_set) if bool(args.failure_buffer_unique) else len(set(failure_buffer))
                                 ),
                                 "failure_replay_quota": int(replay_quota),
+                                "replay_gate_blocked": bool(replay_gate_blocked),
+                                "replay_success_ema": float(replay_success_ema or 0.0),
                                 "zero_credit_fallback_hits": int(zero_credit_fallback_hits),
                                 "zero_credit_fallback_ratio": float(zero_credit_fallback_ratio),
+                                "all_negative_guard_triggered": bool(all_negative_guard_triggered),
+                                "reward_span": float(reward_span),
+                                "global_max_abs_weight": float(global_max_abs_weight),
+                                "optimizer_step_skipped": bool(skip_optimizer_step),
                                 "step_wall_time": float(time.time() - step_start),
                                 "rollout_wall_time": float(rollout_end - rollout_build_end),
                                 "update_wall_time": float(update_end - rollout_end),
@@ -825,7 +869,8 @@ def run_hf(args, config: ExperimentConfig) -> None:
                 total_step_time = time.time() - step_start
                 print(
                     f"[Rank 0] Step {step} done in {total_step_time:.1f}s "
-                    f"(samples={len(sampled_sequences)}, replay_quota={replay_quota})",
+                    f"(samples={len(sampled_sequences)}, replay_quota={replay_quota}, "
+                    f"replay_gate_blocked={int(replay_gate_blocked)})",
                     flush=True,
                 )
 

@@ -198,10 +198,33 @@ def parse_args():
     )
     parser.add_argument("--failure_buffer_size", type=int, default=4096)
     parser.add_argument("--failure_replay_warmup_steps", type=int, default=0)
+    parser.add_argument(
+        "--replay_min_success_ema",
+        type=float,
+        default=0.2,
+        help="(hf) enable failure replay only when smoothed success_rate >= this threshold",
+    )
+    parser.add_argument(
+        "--replay_ema_alpha",
+        type=float,
+        default=0.1,
+        help="(hf) EMA alpha for replay gating success rate",
+    )
     add_bool_flag(
         "--failure_buffer_unique",
         default=True,
         help="(hf) keep failure replay buffer task ids unique to avoid over-concentrating a few hard examples",
+    )
+    add_bool_flag(
+        "--guard_all_negative_batch",
+        default=True,
+        help="(hf) if a batch is pure-failure with all non-positive weights, zero-out weights to avoid collapse",
+    )
+    parser.add_argument(
+        "--all_negative_reward_span_threshold",
+        type=float,
+        default=1e-8,
+        help="(hf) reward-span threshold for pure-failure negative-batch guard",
     )
     add_bool_flag(
         "--log_agop",
