@@ -12,6 +12,7 @@ import uuid
 import ast
 import json
 import re
+import copy
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
@@ -49,6 +50,28 @@ class CodeEnv(BaseEnv):
         self._start_time: float = 0.0
         self._total_tokens: int = 0
         self._total_tool_calls: int = 0
+        self._last_verifier_info: Optional[VerifierInfo] = None
+        self._last_verifier_key: Optional[Tuple[str, str, Optional[str]]] = None
+
+    def _verification_key(self) -> Tuple[str, str, Optional[str]]:
+        if self.current_task is None:
+            return ("", "", None)
+        return (
+            self.current_code,
+            self.current_task.test_code,
+            self.current_task.expected_output,
+        )
+
+    def _remember_verifier(self, verifier_info: VerifierInfo) -> None:
+        self._last_verifier_info = copy.deepcopy(verifier_info)
+        self._last_verifier_key = self._verification_key()
+
+    def _get_cached_verifier(self) -> Optional[VerifierInfo]:
+        if self._last_verifier_info is None:
+            return None
+        if self._last_verifier_key != self._verification_key():
+            return None
+        return copy.deepcopy(self._last_verifier_info)
 
     @staticmethod
     def _safe_timeout(value: Any, default: float) -> float:
@@ -87,6 +110,8 @@ class CodeEnv(BaseEnv):
         self._start_time = time.time()
         self._total_tokens = 0
         self._total_tool_calls = 0
+        self._last_verifier_info = None
+        self._last_verifier_key = None
         
         # 构建初始观察
         obs_content = f"Task: {self.current_task.prompt}\n\n"
@@ -142,6 +167,8 @@ class CodeEnv(BaseEnv):
     def _handle_code_write(self, action: Action) -> Tuple[Observation, float, bool, Dict[str, Any]]:
         """处理代码编写动作"""
         self.current_code = action.content
+        self._last_verifier_info = None
+        self._last_verifier_key = None
         
         obs = Observation(
             content=f"Code updated successfully.\n\nCurrent code:\n```{self.current_task.language}\n{self.current_code}\n```",
@@ -213,6 +240,12 @@ class CodeEnv(BaseEnv):
         cache_key = f"test_{hash(full_code)}"
         cached_result = self.get_cached_tool_output(cache_key)
         if cached_result is not None:
+            try:
+                cached_vi = cached_result[3].get("verifier_info")
+                if isinstance(cached_vi, VerifierInfo):
+                    self._remember_verifier(cached_vi)
+            except Exception:
+                pass
             return cached_result
         
         suite_output = self._execute_assert_suite(self.current_code, self.current_task.test_code)
@@ -246,6 +279,7 @@ class CodeEnv(BaseEnv):
             "result": result
         })
         self.cache_tool_output(cache_key, response)
+        self._remember_verifier(verifier_info)
         
         return response
 
@@ -448,24 +482,40 @@ class CodeEnv(BaseEnv):
     
     def verify(self) -> VerifierInfo:
         """验证当前代码是否通过所有测试"""
+        cached_verifier = self._get_cached_verifier()
+        if cached_verifier is not None:
+            return cached_verifier
+
         if not self.current_task.test_code:
             # 没有测试用例，检查是否有期望输出
             if self.current_task.expected_output:
                 result = self._execute_code(self.current_code)
                 if result["success"] and result["stdout"].strip() == self.current_task.expected_output.strip():
-                    return VerifierInfo(success=True, score=1.0)
+                    verifier_info = VerifierInfo(success=True, score=1.0)
+                    self._remember_verifier(verifier_info)
+                    return verifier_info
                 else:
-                    return VerifierInfo(
+                    verifier_info = VerifierInfo(
                         success=False, 
                         score=0.0,
                         error_message="Output mismatch",
                         diff_info=f"Expected: {self.current_task.expected_output}\nGot: {result['stdout']}"
                     )
-            return VerifierInfo(success=False, score=0.0, error_message="No verification criteria")
+                    self._remember_verifier(verifier_info)
+                    return verifier_info
+            verifier_info = VerifierInfo(success=False, score=0.0, error_message="No verification criteria")
+            self._remember_verifier(verifier_info)
+            return verifier_info
         
         # 运行测试
         _, _, _, info = self._run_tests()
-        return info.get("verifier_info", VerifierInfo(success=False, score=0.0))
+        verifier_info = info.get("verifier_info", VerifierInfo(success=False, score=0.0))
+        if isinstance(verifier_info, VerifierInfo):
+            self._remember_verifier(verifier_info)
+            return verifier_info
+        fallback = VerifierInfo(success=False, score=0.0)
+        self._remember_verifier(fallback)
+        return fallback
     
     def get_trajectory(self) -> Trajectory:
         """获取当前轨迹"""

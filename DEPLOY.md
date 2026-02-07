@@ -170,6 +170,13 @@ TRAIN_DATA=datasets/code/mbpp_train.jsonl \
 EVAL_DATA=datasets/code/humaneval_test.jsonl \
 sbatch scripts/slurm/run_paper_a_hf_1gpu.sh
 
+# 多卡稳定性（默认已开启，可显式指定）
+# - SYNC_EVAL_AND_SAVE=1: eval/save 前后做 barrier，避免 rank0 慢评估引起 DDP 卡住
+# - TRUNCATE_TO_GLOBAL_MIN_SAMPLES=1: 各 rank 每步样本数对齐到全局最小值，减少长尾阻塞
+# - HEARTBEAT_INTERVAL=1: rank0 每步打印心跳，避免“无输出误判挂死”
+# - FALLBACK_TO_ADV_WHEN_ZERO_CREDIT=1: step-credit 全零时回退到 trajectory advantage，避免无梯度更新
+# - FAILURE_BUFFER_UNIQUE=1: failure replay 缓冲区按 task 去重，避免被少数 hard task 拖死
+
 # Paper A: A0 vs A1 对照（验证 counterfactual credit 是否有效）
 # A1: 开启反事实 credit（默认就是开）
 USE_COUNTERFACTUAL_CREDIT=1 \

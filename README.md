@@ -24,7 +24,11 @@ neurips2026_plans/
 │   ├── counterfactual.py            # 反事实干预生成与执行
 │   ├── credit_estimator.py          # Credit估计器
 │   ├── advantage_mapper.py          # Advantage映射
-│   └── train.py                     # 训练入口
+│   ├── train_args.py                # 训练参数定义
+│   ├── train_utils.py               # 共享训练工具函数
+│   ├── toy_runner.py                # toy backend runner
+│   ├── hf_runner.py                 # HF backend runner (DDP)
+│   └── train.py                     # 精简训练入口
 │
 ├── paper_b_conflict_aware/          # Paper B: 冲突感知RLVR
 │   ├── group_assignment.py          # 分组策略
@@ -101,6 +105,13 @@ python3 paper_a_credit_assignment/train.py \
 ```
 
 单机多卡（DDP）建议用 `torchrun`（见 `scripts/slurm/run_paper_a_hf_4gpu.sh`）。
+
+多卡默认启用两项稳定性保护（可通过环境变量关闭）：
+
+- `SYNC_EVAL_AND_SAVE=1`：在 eval/checkpoint 前后加分布式栅栏，避免 rank0 慢评估导致其余 rank 在下一步 DDP 卡住。
+- `TRUNCATE_TO_GLOBAL_MIN_SAMPLES=1`：各 rank 每步按全局最小 sample 数对齐，降低步间时长抖动和长尾阻塞。
+- `FALLBACK_TO_ADV_WHEN_ZERO_CREDIT=1`：当 counterfactual 映射出的 step-credit 近似全零时，回退到 trajectory advantage，避免整步无更新。
+- `FAILURE_BUFFER_UNIQUE=1`：failure replay buffer 按 task 去重，避免被少数困难样本过度采样。
 
 ### 关键参数
 
