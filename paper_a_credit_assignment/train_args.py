@@ -79,6 +79,12 @@ def parse_args():
         default=4,
         help="(hf) sampled decoding count per eval task for pass@k-style eval (<=1 disables sampled eval)",
     )
+    parser.add_argument(
+        "--eval_gen_batch_size",
+        type=int,
+        default=8,
+        help="(hf) generation batch size used in held-out eval to avoid OOM",
+    )
     add_bool_flag(
         "--require_cuda",
         default=True,

@@ -86,6 +86,7 @@ def _evaluate_heldout_metrics(
             )
 
     sample_k = max(1, int(getattr(args, "eval_sample_k", 1)))
+    eval_gen_batch_size = max(1, int(getattr(args, "eval_gen_batch_size", 8)))
     if not eval_prompts:
         return {
             "pass_at_1": 0.0,
@@ -95,6 +96,7 @@ def _evaluate_heldout_metrics(
             "sampled_pass_at_k_strict": 0.0,
             "sampled_mean_score": 0.0,
             "eval_sample_k": float(sample_k),
+            "eval_gen_batch_size": float(eval_gen_batch_size),
         }
 
     import torch
@@ -138,21 +140,49 @@ def _evaluate_heldout_metrics(
         strict = 1.0 if (bool(done) and score >= 1.0 - 1e-8) else 0.0
         return {"score": score, "strict": strict}
 
+    def _generate_contents(prompts: List[str], *, do_sample: bool) -> List[str]:
+        contents: List[str] = []
+        for start in range(0, len(prompts), eval_gen_batch_size):
+            chunk_prompts = prompts[start : start + eval_gen_batch_size]
+            in_ids, attn, p_lens = _encode(chunk_prompts)
+            try:
+                with torch.no_grad():
+                    if do_sample:
+                        seqs = gen_model.generate(
+                            input_ids=in_ids,
+                            attention_mask=attn,
+                            do_sample=True,
+                            temperature=float(args.temperature),
+                            top_p=float(args.top_p),
+                            max_new_tokens=int(args.max_new_tokens),
+                            pad_token_id=tokenizer.pad_token_id,
+                            eos_token_id=tokenizer.eos_token_id,
+                        )
+                    else:
+                        seqs = gen_model.generate(
+                            input_ids=in_ids,
+                            attention_mask=attn,
+                            do_sample=False,
+                            max_new_tokens=int(args.max_new_tokens),
+                            pad_token_id=tokenizer.pad_token_id,
+                            eos_token_id=tokenizer.eos_token_id,
+                        )
+            except torch.OutOfMemoryError as e:
+                raise RuntimeError(
+                    "OOM in held-out eval generation. "
+                    "Try lowering --eval_gen_batch_size / --eval_sample_k / --eval_tasks."
+                ) from e
+            for seq, p_len in zip(seqs, p_lens):
+                contents.append(_decode_completion(seq, p_len))
+            del in_ids, attn, seqs
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+        return contents
+
     greedy_scores: List[float] = []
     greedy_strict: List[float] = []
-    in_ids, attn, p_lens = _encode(eval_prompts)
-    with torch.no_grad():
-        greedy_seqs = gen_model.generate(
-            input_ids=in_ids,
-            attention_mask=attn,
-            do_sample=False,
-            max_new_tokens=int(args.max_new_tokens),
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
-
-    for seq, task, p_len in zip(greedy_seqs, eval_tasks, p_lens):
-        content = _decode_completion(seq, p_len)
+    greedy_contents = _generate_contents(eval_prompts, do_sample=False)
+    for content, task in zip(greedy_contents, eval_tasks):
         out = _run_eval_task(task, content)
         greedy_scores.append(out["score"])
         greedy_strict.append(out["strict"])
@@ -167,24 +197,11 @@ def _evaluate_heldout_metrics(
                 sampled_prompts.append(prompt)
                 sampled_task_indices.append(task_idx)
 
-        sin_ids, sattn, sp_lens = _encode(sampled_prompts)
-        with torch.no_grad():
-            sampled_seqs = gen_model.generate(
-                input_ids=sin_ids,
-                attention_mask=sattn,
-                do_sample=True,
-                temperature=float(args.temperature),
-                top_p=float(args.top_p),
-                max_new_tokens=int(args.max_new_tokens),
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-            )
-
+        sampled_contents = _generate_contents(sampled_prompts, do_sample=True)
         sampled_task_scores: List[List[float]] = [[] for _ in eval_tasks]
         sampled_task_strict: List[List[float]] = [[] for _ in eval_tasks]
-        for seq, task_idx, p_len in zip(sampled_seqs, sampled_task_indices, sp_lens):
+        for content, task_idx in zip(sampled_contents, sampled_task_indices):
             task = eval_tasks[int(task_idx)]
-            content = _decode_completion(seq, p_len)
             out = _run_eval_task(task, content)
             sampled_task_scores[int(task_idx)].append(out["score"])
             sampled_task_strict[int(task_idx)].append(out["strict"])
@@ -215,6 +232,7 @@ def _evaluate_heldout_metrics(
         "sampled_pass_at_k_strict": sampled_pass_at_k_strict,
         "sampled_mean_score": sampled_mean_score,
         "eval_sample_k": float(sample_k),
+        "eval_gen_batch_size": float(eval_gen_batch_size),
     }
 
 
@@ -334,6 +352,7 @@ def run_hf(args, config: ExperimentConfig) -> None:
                 "all_negative_reward_span_threshold": float(args.all_negative_reward_span_threshold),
                 "max_policy_turns": int(args.max_policy_turns),
                 "eval_sample_k": int(max(1, int(args.eval_sample_k))),
+                "eval_gen_batch_size": int(max(1, int(args.eval_gen_batch_size))),
                 "task_timeout_seconds": float(args.task_timeout_seconds),
                 "cap_task_timeout": True,
                 "sync_eval_and_save": bool(args.sync_eval_and_save),
@@ -941,6 +960,7 @@ def run_hf(args, config: ExperimentConfig) -> None:
                         "sampled_pass_at_k_strict": float(eval_res["sampled_pass_at_k_strict"]),
                         "sampled_mean_score": float(eval_res["sampled_mean_score"]),
                         "eval_sample_k": int(eval_res["eval_sample_k"]),
+                        "eval_gen_batch_size": int(eval_res["eval_gen_batch_size"]),
                     },
                 )
 
