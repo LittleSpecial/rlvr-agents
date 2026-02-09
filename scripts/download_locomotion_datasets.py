@@ -22,6 +22,7 @@ import os
 import pickle as pkl
 import random
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
@@ -46,6 +47,8 @@ load_environment = None
 sequence_dataset_mix = None
 d4rl_offline_dataset = None
 DATA_BACKEND = None
+DOWNLOAD_RETRIES = 5
+DOWNLOAD_RETRY_WAIT = 5
 
 
 def _lazy_imports() -> None:
@@ -130,6 +133,51 @@ def _max_episode_steps_for_env(env_full_name: str) -> int:
     raise ValueError(f"Unsupported env for fallback backend: {env_full_name}")
 
 
+def _normalize_tag(value: str) -> str:
+    return "".join(ch for ch in value.lower() if ch.isalnum())
+
+
+def _find_cached_hdf5_files(env_full_name: str) -> List[Path]:
+    cache_dir = Path(os.environ.get("D4RL_DATASET_DIR", str(Path.home() / ".d4rl" / "datasets"))).expanduser()
+    if not cache_dir.exists():
+        return []
+
+    stem_tokens = [tok for tok in env_full_name.replace(".hdf5", "").split("-") if tok and tok != "v2"]
+    token_norms = [_normalize_tag(tok) for tok in stem_tokens]
+
+    candidates: List[Path] = []
+    for fp in cache_dir.glob("*.hdf5"):
+        stem_norm = _normalize_tag(fp.stem)
+        if all(tok in stem_norm for tok in token_norms):
+            candidates.append(fp)
+
+    if candidates:
+        return sorted(candidates)
+
+    env_name = env_full_name.split("-")[0]
+    return sorted(cache_dir.glob(f"{env_name}*.hdf5"))
+
+
+def _clear_partial_cache_files(env_full_name: str) -> None:
+    files = _find_cached_hdf5_files(env_full_name)
+    if not files:
+        print(f"[retry] no cached hdf5 found for {env_full_name}")
+        return
+    for fp in files:
+        try:
+            size = fp.stat().st_size
+        except OSError:
+            size = -1
+        try:
+            fp.unlink()
+            if size >= 0:
+                print(f"[retry] removed partial cache: {fp} ({size} bytes)")
+            else:
+                print(f"[retry] removed partial cache: {fp}")
+        except OSError as e:
+            print(f"[retry][warn] failed to remove {fp}: {e}")
+
+
 def _dataset_like_to_dict(dataset_like) -> Dict[str, np.ndarray]:
     if isinstance(dataset_like, dict):
         out = {}
@@ -211,7 +259,29 @@ def _load_trajs_and_dataset(env_full_name: str) -> Tuple[List[Dict], Dict[str, n
         return trajs, dataset, int(env.max_episode_steps)
 
     if DATA_BACKEND == "just_d4rl":
-        dataset_like = d4rl_offline_dataset(env_full_name)
+        attempts = max(1, int(DOWNLOAD_RETRIES))
+        last_err = None
+        for attempt in range(1, attempts + 1):
+            try:
+                dataset_like = d4rl_offline_dataset(env_full_name)
+                break
+            except Exception as e:
+                last_err = e
+                if e.__class__.__name__ == "ContentTooShortError" and attempt < attempts:
+                    print(
+                        f"[retry] partial download for {env_full_name} "
+                        f"(attempt {attempt}/{attempts}); cleaning cache and retrying..."
+                    )
+                    _clear_partial_cache_files(env_full_name)
+                    wait_s = max(0, int(DOWNLOAD_RETRY_WAIT)) * attempt
+                    if wait_s > 0:
+                        print(f"[retry] waiting {wait_s}s before retry")
+                        time.sleep(wait_s)
+                    continue
+                raise
+        else:
+            raise RuntimeError(f"Failed to fetch {env_full_name}: {last_err}")
+
         dataset = _dataset_like_to_dict(dataset_like)
         trajs, dataset = _sequence_dataset_mix_from_dataset_dict(dataset, env_full_name)
         return trajs, dataset, _max_episode_steps_for_env(env_full_name)
@@ -459,6 +529,7 @@ def build_cluster_info(cfg: ClusterBuildConfig, dataset_infos_dir: Path, *, skip
 
 
 def main() -> None:
+    global DOWNLOAD_RETRIES, DOWNLOAD_RETRY_WAIT
     parser = argparse.ArgumentParser(description="One-click ContraDiff locomotion dataset preparation")
     parser.add_argument("--envs", type=str, default="halfcheetah,hopper,walker2d")
     parser.add_argument("--datasets", type=str, default="expert,medium,medium-replay,random")
@@ -469,9 +540,13 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=1000)
     parser.add_argument("--dataset-infos-dir", type=str, default=str(MAIN_DIR / "dataset_infos"))
     parser.add_argument("--value-dir", type=str, default=str(MAIN_DIR / "value_of_states"))
+    parser.add_argument("--download-retries", type=int, default=5)
+    parser.add_argument("--download-retry-wait", type=int, default=5)
     parser.add_argument("--skip-existing", action="store_true")
     args = parser.parse_args()
     _lazy_imports()
+    DOWNLOAD_RETRIES = int(args.download_retries)
+    DOWNLOAD_RETRY_WAIT = int(args.download_retry_wait)
 
     envs = parse_csv_arg(args.envs)
     datasets = parse_csv_arg(args.datasets)
@@ -498,6 +573,8 @@ def main() -> None:
             "max_iter": args.max_iter,
             "dataset_infos_dir": str(dataset_infos_dir),
             "value_dir": str(value_dir),
+            "download_retries": int(DOWNLOAD_RETRIES),
+            "download_retry_wait": int(DOWNLOAD_RETRY_WAIT),
             "skip_existing": bool(args.skip_existing),
         },
         indent=2,
