@@ -1,0 +1,3 @@
+[submodule "contradiff"]
+	path = contradiff
+	url = https://github.com/LittleSpecial/contradiff.git
