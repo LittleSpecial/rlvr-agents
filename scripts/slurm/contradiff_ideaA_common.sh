@@ -96,25 +96,41 @@ PY
 echo "=== Python dependency check ==="
 "${PYTHON_BIN}" - <<'PY'
 import importlib.util
+import os
 import sys
 
-mods = ["gym", "d4rl", "mujoco_py", "numpy", "scipy", "sklearn", "h5py"]
+use_just = os.environ.get("USE_JUST_D4RL_BACKEND", "1") == "1"
+mods = ["gym", "numpy", "scipy", "sklearn", "h5py"]
+if use_just:
+    mods.append("just_d4rl")
+else:
+    mods += ["d4rl", "mujoco_py"]
 missing = [m for m in mods if importlib.util.find_spec(m) is None]
 if missing:
     py = sys.executable
+    if use_just:
+        fix_hint = (
+            f"  {py} -m pip install --no-user gym==0.26.2 numpy scipy scikit-learn h5py just-d4rl\n"
+            "Or (if you intentionally installed to user-site): set PYTHONNOUSERSITE=0 when submitting."
+        )
+    else:
+        fix_hint = (
+            f"  {py} -m pip install --no-user gym==0.23.1 numpy scipy scikit-learn h5py mujoco-py==2.1.2.14\n"
+            f"  {py} -m pip install --no-user --no-deps 'd4rl @ git+https://github.com/Farama-Foundation/D4RL.git'\n"
+            "And set MUJOCO_PY_MUJOCO_PATH (e.g., $HOME/.mujoco/mujoco210)."
+        )
     raise SystemExit(
         "[ERROR] Missing python deps in runtime env: "
         + ", ".join(missing)
         + "\nInstall with:\n"
-        + f"  {py} -m pip install --no-user gym==0.26.2 numpy scipy scikit-learn h5py\n"
-        + f"  {py} -m pip install --no-user 'd4rl @ git+https://github.com/Farama-Foundation/D4RL.git'\n"
-        + "\nOr (if you intentionally installed to user-site): set PYTHONNOUSERSITE=0 when submitting."
+        + fix_hint
     )
 print("python deps: OK")
 PY
 
-echo "=== D4RL env registration check ==="
-"${PYTHON_BIN}" - <<'PY'
+if [ "${USE_JUST_D4RL_BACKEND:-1}" != "1" ]; then
+  echo "=== D4RL env registration check ==="
+  "${PYTHON_BIN}" - <<'PY'
 import gym
 import d4rl  # noqa: F401
 
@@ -130,6 +146,9 @@ except Exception as e:
     )
 print("d4rl env check: OK", name, "max_episode_steps=", getattr(env, "_max_episode_steps", "NA"))
 PY
+else
+  echo "=== just-d4rl mode: skip gym.make(d4rl-env) check ==="
+fi
 
 CONTRADIFF_DIR="${CONTRADIFF_DIR:-${SLURM_SUBMIT_DIR:-$PWD}/contradiff}"
 if [ ! -d "${CONTRADIFF_DIR}/main" ]; then
@@ -139,6 +158,7 @@ fi
 
 BRANCH="${BRANCH:-plan2_hard}"
 DATASET="${DATASET:-hopper-random-v2}"
+RENDERER="${RENDERER:-utils.NullRenderer}"
 EXP_DATASET="${EXP_DATASET:-expert}"
 EXPERT_RATIO="${EXPERT_RATIO:-0.2}"
 LOWERBOUND="${LOWERBOUND:-0.2}"
@@ -193,6 +213,7 @@ fi
 echo "=== ContraDiff run config ==="
 echo "CONTRADIFF_DIR=${CONTRADIFF_DIR}"
 echo "BRANCH=${BRANCH} DATASET=${DATASET}"
+echo "RENDERER=${RENDERER} USE_JUST_D4RL_BACKEND=${USE_JUST_D4RL_BACKEND:-1}"
 echo "EXP_DATASET=${EXP_DATASET} EXPERT_RATIO=${EXPERT_RATIO}"
 echo "LOWERBOUND=${LOWERBOUND} UPPERBOUND=${UPPERBOUND} METRICS=${METRICS}"
 echo "HORIZON=${HORIZON} N_DIFFUSION_STEPS=${N_DIFFUSION_STEPS}"
@@ -212,6 +233,7 @@ PY_ARGS=(
   main/train_diffuser.py
   --branch "${BRANCH}"
   --dataset "${DATASET}"
+  --renderer "${RENDERER}"
   --exp_dataset "${EXP_DATASET}"
   --expert_ratio "${EXPERT_RATIO}"
   --lowerbound "${LOWERBOUND}"
