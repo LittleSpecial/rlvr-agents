@@ -73,6 +73,11 @@ fi
 echo "=== Module list ==="
 module list 2>&1 || true
 
+if [ -n "${MUJOCO_PY_MUJOCO_PATH:-}" ]; then
+  export LD_LIBRARY_PATH="${MUJOCO_PY_MUJOCO_PATH}/bin:${LD_LIBRARY_PATH:-}"
+  echo "MUJOCO_PY_MUJOCO_PATH=${MUJOCO_PY_MUJOCO_PATH}"
+fi
+
 echo "=== nvidia-smi ==="
 nvidia-smi || true
 
@@ -93,7 +98,7 @@ echo "=== Python dependency check ==="
 import importlib.util
 import sys
 
-mods = ["gym", "d4rl", "numpy", "scipy", "sklearn", "h5py"]
+mods = ["gym", "d4rl", "mujoco_py", "numpy", "scipy", "sklearn", "h5py"]
 missing = [m for m in mods if importlib.util.find_spec(m) is None]
 if missing:
     py = sys.executable
@@ -106,6 +111,24 @@ if missing:
         + "\nOr (if you intentionally installed to user-site): set PYTHONNOUSERSITE=0 when submitting."
     )
 print("python deps: OK")
+PY
+
+echo "=== D4RL env registration check ==="
+"${PYTHON_BIN}" - <<'PY'
+import gym
+import d4rl  # noqa: F401
+
+name = "hopper-random-v2"
+try:
+    env = gym.make(name)
+except Exception as e:
+    raise SystemExit(
+        f"[ERROR] gym.make('{name}') failed: {type(e).__name__}: {e}\n"
+        "Likely missing MuJoCo runtime / mujoco_py compatibility.\n"
+        "Set MUJOCO_PY_MUJOCO_PATH (e.g., $HOME/.mujoco/mujoco210) and ensure "
+        "mujoco_py is installed in the same Python env."
+    )
+print("d4rl env check: OK", name, "max_episode_steps=", getattr(env, "_max_episode_steps", "NA"))
 PY
 
 CONTRADIFF_DIR="${CONTRADIFF_DIR:-${SLURM_SUBMIT_DIR:-$PWD}/contradiff}"
