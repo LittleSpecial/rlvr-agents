@@ -245,8 +245,18 @@ if ! [[ "${NUM_GPUS}" =~ ^[0-9]+$ ]] || [ "${NUM_GPUS}" -lt 1 ]; then
   echo "[ERR] Invalid NUM_GPUS=${NUM_GPUS}" >&2
   exit 2
 fi
+USE_DATAPARALLEL="${USE_DATAPARALLEL:-1}"
+export NUM_GPUS
+export USE_DATAPARALLEL
 if [ "${NUM_GPUS}" -gt 1 ]; then
-  echo "[WARN] ContraDiff train_diffuser.py is single-process; using DEVICE=${DEVICE}."
+  if [ "${USE_DATAPARALLEL}" = "1" ]; then
+    echo "[INFO] Multi-GPU enabled via torch.nn.DataParallel (single-process), NUM_GPUS=${NUM_GPUS}."
+    if [ "${BATCH_SIZE}" -lt "${NUM_GPUS}" ]; then
+      echo "[WARN] BATCH_SIZE=${BATCH_SIZE} < NUM_GPUS=${NUM_GPUS}; some GPUs may be under-utilized."
+    fi
+  else
+    echo "[WARN] USE_DATAPARALLEL=${USE_DATAPARALLEL}; job will still run single-process on DEVICE=${DEVICE}."
+  fi
 fi
 
 printf -v EXPERT_RATIO_FMT "%.2f" "${EXPERT_RATIO}"
