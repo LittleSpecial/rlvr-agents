@@ -15,7 +15,7 @@ cd "${SLURM_SUBMIT_DIR:-$PWD}"
 
 export TMPDIR="${TMPDIR:-$HOME/tmp}"
 mkdir -p "${TMPDIR}"
-export PYTHONNOUSERSITE=1
+export PYTHONNOUSERSITE="${PYTHONNOUSERSITE:-1}"
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
@@ -86,6 +86,26 @@ print("cuda.is_available:", torch.cuda.is_available())
 print("device_count:", torch.cuda.device_count())
 if not torch.cuda.is_available():
     raise SystemExit("\n[ERROR] torch.cuda.is_available() == False\n")
+PY
+
+echo "=== Python dependency check ==="
+"${PYTHON_BIN}" - <<'PY'
+import importlib.util
+import sys
+
+mods = ["gym", "d4rl", "numpy", "scipy", "sklearn", "h5py"]
+missing = [m for m in mods if importlib.util.find_spec(m) is None]
+if missing:
+    py = sys.executable
+    raise SystemExit(
+        "[ERROR] Missing python deps in runtime env: "
+        + ", ".join(missing)
+        + "\nInstall with:\n"
+        + f"  {py} -m pip install --no-user gym==0.26.2 numpy scipy scikit-learn h5py\n"
+        + f"  {py} -m pip install --no-user 'd4rl @ git+https://github.com/Farama-Foundation/D4RL.git'\n"
+        + "\nOr (if you intentionally installed to user-site): set PYTHONNOUSERSITE=0 when submitting."
+    )
+print("python deps: OK")
 PY
 
 CONTRADIFF_DIR="${CONTRADIFF_DIR:-${SLURM_SUBMIT_DIR:-$PWD}/contradiff}"
