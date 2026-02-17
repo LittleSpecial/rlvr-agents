@@ -100,7 +100,19 @@ import os
 import sys
 
 use_just = os.environ.get("USE_JUST_D4RL_BACKEND", "1") == "1"
-mods = ["gym", "numpy", "scipy", "sklearn", "h5py"]
+mods = [
+    "gym",
+    "numpy",
+    "scipy",
+    "sklearn",
+    "h5py",
+    "einops",
+    "tap",
+    "wandb",
+    "matplotlib",
+    "umap",
+    "git",
+]
 if use_just:
     mods.append("just_d4rl")
 else:
@@ -110,12 +122,14 @@ if missing:
     py = sys.executable
     if use_just:
         fix_hint = (
-            f"  {py} -m pip install --no-user gym==0.26.2 numpy scipy scikit-learn h5py just-d4rl\n"
+            f"  {py} -m pip install --no-user gym==0.26.2 numpy scipy scikit-learn h5py just-d4rl "
+            "einops typed-argument-parser wandb matplotlib umap-learn gitpython\n"
             "Or (if you intentionally installed to user-site): set PYTHONNOUSERSITE=0 when submitting."
         )
     else:
         fix_hint = (
-            f"  {py} -m pip install --no-user gym==0.23.1 numpy scipy scikit-learn h5py mujoco-py==2.1.2.14\n"
+            f"  {py} -m pip install --no-user gym==0.23.1 numpy scipy scikit-learn h5py mujoco-py==2.1.2.14 "
+            "einops typed-argument-parser wandb matplotlib umap-learn gitpython\n"
             f"  {py} -m pip install --no-user --no-deps 'd4rl @ git+https://github.com/Farama-Foundation/D4RL.git'\n"
             "And set MUJOCO_PY_MUJOCO_PATH (e.g., $HOME/.mujoco/mujoco210)."
         )
@@ -155,6 +169,41 @@ if [ ! -d "${CONTRADIFF_DIR}/main" ]; then
   echo "[ERR] CONTRADIFF_DIR is invalid: ${CONTRADIFF_DIR}" >&2
   exit 2
 fi
+
+echo "=== ContraDiff dataset loader check ==="
+CONTRADIFF_DIR="${CONTRADIFF_DIR}" DATASET="${DATASET:-hopper-random-v2}" USE_JUST_D4RL_BACKEND="${USE_JUST_D4RL_BACKEND:-1}" \
+"${PYTHON_BIN}" - <<'PY'
+import os
+import sys
+
+repo = os.environ["CONTRADIFF_DIR"]
+sys.path.insert(0, os.path.join(repo, "main"))
+
+try:
+    from diffuser.datasets import d4rl as d4rl_dataset
+except Exception as e:
+    raise SystemExit(
+        "[ERROR] Failed to import ContraDiff dataset loader: "
+        f"{type(e).__name__}: {e}\n"
+        "If you are using aarch64/just-d4rl mode, sync patched file:\n"
+        "  contradiff/main/diffuser/datasets/d4rl.py\n"
+        "and ensure it wraps `import d4rl` in try/except."
+    )
+
+if os.environ.get("USE_JUST_D4RL_BACKEND", "1") == "1":
+    name = os.environ.get("DATASET", "hopper-random-v2")
+    env = d4rl_dataset.load_environment(name)
+    print(
+        "dataset loader probe: OK",
+        name,
+        "env_type=",
+        type(env).__name__,
+        "max_steps=",
+        getattr(env, "_max_episode_steps", "NA"),
+    )
+else:
+    print("dataset loader probe: OK (full d4rl mode)")
+PY
 
 BRANCH="${BRANCH:-plan2_hard}"
 DATASET="${DATASET:-hopper-random-v2}"
