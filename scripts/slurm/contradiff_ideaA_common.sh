@@ -110,9 +110,7 @@ mods = [
     "tap",
     "wandb",
     "matplotlib",
-    "umap",
     "git",
-    "params_proto",
 ]
 if use_just:
     mods.append("just_d4rl")
@@ -124,13 +122,13 @@ if missing:
     if use_just:
         fix_hint = (
             f"  {py} -m pip install --no-user gym==0.26.2 numpy scipy scikit-learn h5py just-d4rl "
-            "einops typed-argument-parser wandb matplotlib umap-learn gitpython params-proto\n"
+            "einops typed-argument-parser wandb matplotlib gitpython\n"
             "Or (if you intentionally installed to user-site): set PYTHONNOUSERSITE=0 when submitting."
         )
     else:
         fix_hint = (
             f"  {py} -m pip install --no-user gym==0.23.1 numpy scipy scikit-learn h5py mujoco-py==2.1.2.14 "
-            "einops typed-argument-parser wandb matplotlib umap-learn gitpython params-proto\n"
+            "einops typed-argument-parser wandb matplotlib gitpython\n"
             f"  {py} -m pip install --no-user --no-deps 'd4rl @ git+https://github.com/Farama-Foundation/D4RL.git'\n"
             "And set MUJOCO_PY_MUJOCO_PATH (e.g., $HOME/.mujoco/mujoco210)."
         )
