@@ -111,9 +111,14 @@ submit_track() {
   echo "[${track}] exp=${exp_name} train_job=${train_job} eval_job=${eval_job}"
 }
 
-echo "=== Track A: aarch64-compatible (proxy eval) ==="
-submit_track "base" 0 1 0 1 "${CONDA_ENV}" "${PYTHON_BIN}" "trackA"
-submit_track "idea" 1 1 0 1 "${CONDA_ENV}" "${PYTHON_BIN}" "trackA"
+ENABLE_TRACK_A="${ENABLE_TRACK_A:-1}"
+if [ "${ENABLE_TRACK_A}" = "1" ]; then
+  echo "=== Track A: aarch64-compatible (proxy eval) ==="
+  submit_track "base" 0 1 0 1 "${CONDA_ENV}" "${PYTHON_BIN}" "trackA"
+  submit_track "idea" 1 1 0 1 "${CONDA_ENV}" "${PYTHON_BIN}" "trackA"
+else
+  echo "[INFO] Track A disabled (ENABLE_TRACK_A=${ENABLE_TRACK_A})."
+fi
 
 ENABLE_TRACK_B="${ENABLE_TRACK_B:-1}"
 if [ "${ENABLE_TRACK_B}" = "1" ]; then
@@ -134,4 +139,9 @@ if [ "${ENABLE_TRACK_B}" = "1" ]; then
   submit_track "idea" 1 "${TRACK_B_USE_JUST_D4RL}" "${TRACK_B_STRICT_REAL_EVAL}" "${TRACK_B_ALLOW_VALUE_FALLBACK}" "${TRACK_B_CONDA_ENV}" "${TRACK_B_PYTHON_BIN}" "trackB"
 else
   echo "[INFO] Track B disabled (ENABLE_TRACK_B=${ENABLE_TRACK_B})."
+fi
+
+if [ "${ENABLE_TRACK_A}" != "1" ] && [ "${ENABLE_TRACK_B}" != "1" ]; then
+  echo "[ERR] Both tracks disabled. Set ENABLE_TRACK_A=1 or ENABLE_TRACK_B=1." >&2
+  exit 2
 fi
