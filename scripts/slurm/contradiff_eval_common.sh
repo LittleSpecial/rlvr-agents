@@ -42,6 +42,12 @@ if [ -z "${PYTHON_BIN}" ]; then
   exit 2
 fi
 
+STRICT_REAL_EVAL="${STRICT_REAL_EVAL:-0}"
+EVAL_BACKEND="${EVAL_BACKEND:-auto}"
+export STRICT_REAL_EVAL
+export EVAL_BACKEND
+export CONTRADIFF_EVAL_BACKEND="${EVAL_BACKEND}"
+
 echo "=== Torch wheel info (no import) ==="
 TORCH_WHL_VER="$(${PYTHON_BIN} - <<'PY'
 import importlib.metadata as md
@@ -100,6 +106,7 @@ import os
 import sys
 
 strict_real_eval = os.environ.get("STRICT_REAL_EVAL", "0") == "1"
+eval_backend = os.environ.get("EVAL_BACKEND", "auto").strip().lower()
 mods = [
     "gym",
     "numpy",
@@ -113,11 +120,19 @@ mods = [
     "git",
 ]
 if strict_real_eval:
-    mods += ["d4rl", "mujoco_py"]
+    if eval_backend in ("gymnasium", "gymnasium_mujoco", "mujoco"):
+        mods += ["gymnasium", "mujoco"]
+    else:
+        mods += ["d4rl", "mujoco_py"]
 missing = [m for m in mods if importlib.util.find_spec(m) is None]
 if missing:
     py = sys.executable
-    mode = "paper-style online evaluation" if strict_real_eval else "proxy evaluation"
+    if strict_real_eval and eval_backend in ("gymnasium", "gymnasium_mujoco", "mujoco"):
+        mode = "gymnasium+mujoco online evaluation"
+    elif strict_real_eval:
+        mode = "legacy d4rl+mujoco_py online evaluation"
+    else:
+        mode = "proxy evaluation"
     raise SystemExit(
         f"[ERROR] Missing python deps for {mode}: "
         + ", ".join(missing)
@@ -125,9 +140,16 @@ if missing:
         + f"  {py} -m pip install --no-user gym==0.23.1 numpy scipy scikit-learn h5py "
         + "einops typed-argument-parser wandb matplotlib gitpython\n"
         + (
-            f"  {py} -m pip install --no-user mujoco-py==2.1.2.14\n"
-            f"  {py} -m pip install --no-user --no-deps 'd4rl @ git+https://github.com/Farama-Foundation/D4RL.git'"
-            if strict_real_eval else
+            (
+                f"  {py} -m pip install --no-user 'gymnasium[mujoco]' mujoco"
+                if eval_backend in ("gymnasium", "gymnasium_mujoco", "mujoco")
+                else (
+                    f"  {py} -m pip install --no-user mujoco-py==2.1.2.14\n"
+                    f"  {py} -m pip install --no-user --no-deps 'd4rl @ git+https://github.com/Farama-Foundation/D4RL.git'"
+                )
+            )
+            if strict_real_eval
+            else
             "  # d4rl+mujoco_py are optional in proxy mode"
         )
     )
@@ -161,8 +183,10 @@ VALUESEED="${VALUESEED:-1000}"
 SAVE_PLANNED="${SAVE_PLANNED:-0}"
 SAVE_DIFFUSION="${SAVE_DIFFUSION:-0}"
 STRICT_REAL_EVAL="${STRICT_REAL_EVAL:-0}"
-ALLOW_VALUE_FALLBACK="${ALLOW_VALUE_FALLBACK:-1}"
+EVAL_BACKEND="${EVAL_BACKEND:-auto}"
+ALLOW_VALUE_FALLBACK="${ALLOW_VALUE_FALLBACK:-0}"
 export ALLOW_VALUE_FALLBACK
+export CONTRADIFF_EVAL_BACKEND="${EVAL_BACKEND}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-}"
@@ -204,8 +228,30 @@ if [ ! -d "${VALBASE}" ]; then
 fi
 
 if [ "${STRICT_REAL_EVAL}" = "1" ]; then
-  echo "=== Real env check (paper-style evaluation) ==="
-  DATASET="${DATASET}" "${PYTHON_BIN}" - <<'PY'
+  if [ "${EVAL_BACKEND}" = "gymnasium" ] || [ "${EVAL_BACKEND}" = "gymnasium_mujoco" ] || [ "${EVAL_BACKEND}" = "mujoco" ]; then
+    echo "=== Real env check (gymnasium+mujoco backend) ==="
+    CONTRADIFF_DIR="${CONTRADIFF_DIR}" DATASET="${DATASET}" CONTRADIFF_EVAL_BACKEND="${EVAL_BACKEND}" "${PYTHON_BIN}" - <<'PY'
+import os
+import sys
+
+repo = os.environ["CONTRADIFF_DIR"]
+name = os.environ["DATASET"]
+sys.path.insert(0, os.path.join(repo, "main"))
+
+from diffuser.datasets.d4rl import load_environment  # noqa: E402
+
+env = load_environment(name)
+missing = [m for m in ("reset", "step", "get_normalized_score") if not hasattr(env, m)]
+if missing:
+    raise SystemExit(
+        f"[ERROR] Environment missing required API: {missing}. "
+        "This is not a valid online rollout env."
+    )
+print("real env check: OK", name, "backend=gymnasium", "max_episode_steps=", getattr(env, "_max_episode_steps", "NA"))
+PY
+  else
+    echo "=== Real env check (legacy d4rl+mujoco_py backend) ==="
+    DATASET="${DATASET}" "${PYTHON_BIN}" - <<'PY'
 import os
 import gym
 name = os.environ["DATASET"]
@@ -220,7 +266,7 @@ try:
 except Exception as e:
     raise SystemExit(
         f"[ERROR] gym.make({name}) failed: {type(e).__name__}: {e}\n"
-        "Paper-style evaluation requires a real D4RL MuJoCo env."
+        "Legacy paper-style evaluation requires a D4RL MuJoCo env."
     )
 
 missing = [m for m in ("reset", "step", "get_normalized_score") if not hasattr(env, m)]
@@ -230,8 +276,9 @@ if missing:
         "This is not a valid D4RL rollout env."
     )
 
-print("real env check: OK", name, "max_episode_steps=", getattr(env, "_max_episode_steps", "NA"))
+print("real env check: OK", name, "backend=d4rl", "max_episode_steps=", getattr(env, "_max_episode_steps", "NA"))
 PY
+  fi
 fi
 
 echo "=== ContraDiff eval config ==="
@@ -247,7 +294,7 @@ echo "HORIZON=${HORIZON} N_DIFFUSION_STEPS=${N_DIFFUSION_STEPS}"
 echo "VALUEBRANCH=${VALUEBRANCH} VALUESEED=${VALUESEED}"
 echo "GUIDE_SCALE=${GUIDE_SCALE} BATCH_SIZE=${BATCH_SIZE}"
 echo "SAVE_PLANNED=${SAVE_PLANNED} SAVE_DIFFUSION=${SAVE_DIFFUSION}"
-echo "STRICT_REAL_EVAL=${STRICT_REAL_EVAL} ALLOW_VALUE_FALLBACK=${ALLOW_VALUE_FALLBACK}"
+echo "STRICT_REAL_EVAL=${STRICT_REAL_EVAL} EVAL_BACKEND=${EVAL_BACKEND} ALLOW_VALUE_FALLBACK=${ALLOW_VALUE_FALLBACK}"
 echo "EXTRA_ARGS=${EXTRA_ARGS}"
 
 cd "${CONTRADIFF_DIR}"
