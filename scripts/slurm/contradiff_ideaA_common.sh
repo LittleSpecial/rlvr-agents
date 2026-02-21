@@ -289,41 +289,42 @@ echo "VALUE_OF_STATES_PATH=${VALUE_OF_STATES_PATH}"
 echo "RUN_LOGBASE=${RUN_LOGBASE}"
 echo "EXTRA_ARGS=${EXTRA_ARGS}"
 
+export RENDERER
+export N_DIFFUSION_STEPS
+export MAX_STEPS
+export EVAL_INTERVAL
+export SAVE_INTERVAL
+export LEARNING_RATE
+export DATASET_INFOS_PATH
+export VALUE_OF_STATES_PATH
+export USE_COUNTERFACTUAL_CREDIT
+export COUNTERFACTUAL_K
+export CREDIT_WEIGHT_MODE
+export CREDIT_WEIGHT_NORM
+export CREDIT_WEIGHT_ALPHA
+export CREDIT_WEIGHT_MIN
+export CREDIT_WEIGHT_MAX
+export CREDIT_WEIGHT_ON_DIFFUSION
+export CREDIT_WEIGHT_ON_CONTRAST
+
 cd "${CONTRADIFF_DIR}"
 
 PY_ARGS=(
   main/train_diffuser.py
   --branch "${BRANCH}"
   --dataset "${DATASET}"
-  --renderer "${RENDERER}"
   --exp_dataset "${EXP_DATASET}"
   --expert_ratio "${EXPERT_RATIO}"
   --lowerbound "${LOWERBOUND}"
   --upperbound "${UPPERBOUND}"
   --metrics "${METRICS}"
   --horizon "${HORIZON}"
-  --n_diffusion_steps "${N_DIFFUSION_STEPS}"
   --seed "${SEED}"
   --device "${DEVICE}"
-  --n_train_steps "${MAX_STEPS}"
   --log_freq "${LOG_INTERVAL}"
-  --sample_freq "${EVAL_INTERVAL}"
-  --save_freq "${SAVE_INTERVAL}"
-  --learning_rate "${LEARNING_RATE}"
   --batch_size "${BATCH_SIZE}"
-  --dataset_infos_path "${DATASET_INFOS_PATH}"
-  --value_of_states_path "${VALUE_OF_STATES_PATH}"
   --logbase "${RUN_LOGBASE}"
   --tag "${EXPERIMENT_NAME}"
-  --use_counterfactual_credit "${USE_COUNTERFACTUAL_CREDIT}"
-  --counterfactual_k "${COUNTERFACTUAL_K}"
-  --credit_weight_mode "${CREDIT_WEIGHT_MODE}"
-  --credit_weight_norm "${CREDIT_WEIGHT_NORM}"
-  --credit_weight_alpha "${CREDIT_WEIGHT_ALPHA}"
-  --credit_weight_min "${CREDIT_WEIGHT_MIN}"
-  --credit_weight_max "${CREDIT_WEIGHT_MAX}"
-  --credit_weight_on_diffusion "${CREDIT_WEIGHT_ON_DIFFUSION}"
-  --credit_weight_on_contrast "${CREDIT_WEIGHT_ON_CONTRAST}"
 )
 
 if [ -n "${EXTRA_ARGS}" ]; then
