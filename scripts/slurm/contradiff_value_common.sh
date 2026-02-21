@@ -161,6 +161,14 @@ echo "LEARNING_RATE=${LEARNING_RATE} VALUE_BATCH_SIZE=${VALUE_BATCH_SIZE}"
 echo "VALUE_RENDERER=${VALUE_RENDERER}"
 echo "EXTRA_ARGS=${EXTRA_ARGS}"
 
+export VALUE_RENDERER
+export N_DIFFUSION_STEPS
+export VALUE_STEPS
+export SAVE_INTERVAL
+export LEARNING_RATE
+export VALUE_BATCH_SIZE
+export LOG_INTERVAL
+
 cd "${CONTRADIFF_DIR}"
 
 PY_ARGS=(
@@ -168,17 +176,12 @@ PY_ARGS=(
   --branch "${VALUE_BRANCH}"
   --valuebranch "${VALUE_BRANCH}"
   --dataset "${DATASET}"
-  --renderer "${VALUE_RENDERER}"
   --exp_dataset "${EXP_DATASET}"
   --expert_ratio "${EXPERT_RATIO}"
   --horizon "${HORIZON}"
-  --n_diffusion_steps "${N_DIFFUSION_STEPS}"
   --seed "${SEED}"
   --device "${DEVICE}"
-  --n_train_steps "${VALUE_STEPS}"
   --log_freq "${LOG_INTERVAL}"
-  --save_freq "${SAVE_INTERVAL}"
-  --learning_rate "${LEARNING_RATE}"
   --batch_size "${VALUE_BATCH_SIZE}"
   --logbase "${RUN_LOGBASE}"
 )
