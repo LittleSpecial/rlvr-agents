@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=32
-#SBATCH --time=12:00:00
+#SBATCH --time=48:00:00
 #SBATCH --output=logs/paper_a_hf_%j.out
 #SBATCH --error=logs/paper_a_hf_%j.err
 #SBATCH --export=ALL

@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=32
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
 #SBATCH --output=logs/contradiff_a_%j.out
 #SBATCH --error=logs/contradiff_a_%j.err
 #SBATCH --export=ALL

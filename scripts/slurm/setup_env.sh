@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=4
-#SBATCH --time=00:20:00
+#SBATCH --time=48:00:00
 #SBATCH --output=logs/setup_%j.out
 #SBATCH --error=logs/setup_%j.err
 #SBATCH --export=ALL

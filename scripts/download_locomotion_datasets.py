@@ -10,8 +10,8 @@ What this script prepares:
 
 Default scope matches ContraDiff paper setting:
 - envs: halfcheetah, hopper, walker2d
-- source datasets: expert, medium, medium-replay, random
-- mixed ratios: 0.1, 0.2, 0.3 for {medium, medium-replay, random}
+- source datasets: expert, medium, medium-replay, medium-expert, random
+- mixed ratios: 0.1, 0.2, 0.3 for {medium, medium-replay, medium-expert, random}
 """
 
 from __future__ import annotations
@@ -47,12 +47,16 @@ load_environment = None
 sequence_dataset_mix = None
 d4rl_offline_dataset = None
 DATA_BACKEND = None
+D4RL_BACKEND_AVAILABLE = False
+JUST_D4RL_BACKEND_AVAILABLE = False
 DOWNLOAD_RETRIES = 5
 DOWNLOAD_RETRY_WAIT = 5
 
 
-def _lazy_imports() -> None:
-    global np, cdist, MiniBatchKMeans, load_environment, sequence_dataset_mix, d4rl_offline_dataset, DATA_BACKEND
+def _lazy_imports(prefer_backend: str = "auto") -> None:
+    global np, cdist, MiniBatchKMeans
+    global load_environment, sequence_dataset_mix, d4rl_offline_dataset
+    global DATA_BACKEND, D4RL_BACKEND_AVAILABLE, JUST_D4RL_BACKEND_AVAILABLE
     try:
         import numpy as _np  # type: ignore
         from scipy.spatial.distance import cdist as _cdist  # type: ignore
@@ -73,26 +77,62 @@ def _lazy_imports() -> None:
     d4rl_import_error = None
     just_d4rl_import_error = None
 
-    try:
-        from diffuser.datasets.d4rl import load_environment as __load_environment  # type: ignore
-        from diffuser.datasets.d4rl import sequence_dataset_mix as __sequence_dataset_mix  # type: ignore
+    backend_req = (prefer_backend or "auto").strip().lower()
+    if backend_req not in {"auto", "d4rl", "just_d4rl"}:
+        raise SystemExit(f"[ERR] Unsupported --backend value: {prefer_backend}")
 
-        _load_environment = __load_environment
-        _sequence_dataset_mix = __sequence_dataset_mix
-        backend = "d4rl"
-    except Exception as e:
-        d4rl_import_error = e
+    def _try_import_d4rl():
+        nonlocal _load_environment, _sequence_dataset_mix, d4rl_import_error
+        global D4RL_BACKEND_AVAILABLE
+        try:
+            from diffuser.datasets.d4rl import load_environment as __load_environment  # type: ignore
+            from diffuser.datasets.d4rl import sequence_dataset_mix as __sequence_dataset_mix  # type: ignore
 
-    if backend is None:
+            _load_environment = __load_environment
+            _sequence_dataset_mix = __sequence_dataset_mix
+            D4RL_BACKEND_AVAILABLE = True
+        except BaseException as e:
+            d4rl_import_error = e
+            D4RL_BACKEND_AVAILABLE = False
+
+    def _try_import_just_d4rl():
+        nonlocal _d4rl_offline_dataset, just_d4rl_import_error
+        global JUST_D4RL_BACKEND_AVAILABLE
         try:
             from just_d4rl import d4rl_offline_dataset as __d4rl_offline_dataset  # type: ignore
 
             _d4rl_offline_dataset = __d4rl_offline_dataset
-            backend = "just_d4rl"
-        except Exception as e:
+            JUST_D4RL_BACKEND_AVAILABLE = True
+        except BaseException as e:
             just_d4rl_import_error = e
+            JUST_D4RL_BACKEND_AVAILABLE = False
 
-    if backend is None:
+    if backend_req == "d4rl":
+        _try_import_d4rl()
+        if not D4RL_BACKEND_AVAILABLE:
+            raise SystemExit(
+                f"[ERR] --backend d4rl requested but unavailable: {type(d4rl_import_error).__name__}: {d4rl_import_error}"
+            )
+        backend = "d4rl"
+    elif backend_req == "just_d4rl":
+        _try_import_just_d4rl()
+        if not JUST_D4RL_BACKEND_AVAILABLE:
+            raise SystemExit(
+                "[ERR] --backend just_d4rl requested but unavailable: "
+                f"{type(just_d4rl_import_error).__name__}: {just_d4rl_import_error}"
+            )
+        backend = "just_d4rl"
+    else:
+        # Prefer just_d4rl on aarch64/offline path: broader dataset coverage without gym.make registration.
+        _try_import_just_d4rl()
+        if JUST_D4RL_BACKEND_AVAILABLE:
+            backend = "just_d4rl"
+        else:
+            _try_import_d4rl()
+            if D4RL_BACKEND_AVAILABLE:
+                backend = "d4rl"
+
+    if not D4RL_BACKEND_AVAILABLE and not JUST_D4RL_BACKEND_AVAILABLE:
         py = sys.executable
         raise SystemExit(
             "[ERR] No supported D4RL backend found.\n"
@@ -178,6 +218,18 @@ def _clear_partial_cache_files(env_full_name: str) -> None:
             print(f"[retry][warn] failed to remove {fp}: {e}")
 
 
+def _can_retry_download_error(exc: Exception) -> bool:
+    name = type(exc).__name__
+    text = str(exc).lower()
+    if name == "ContentTooShortError":
+        return True
+    # just_d4rl/h5py can surface partial cache as OSError.
+    if name == "OSError":
+        if "truncated file" in text or "unable to synchronously open file" in text:
+            return True
+    return False
+
+
 def _dataset_like_to_dict(dataset_like) -> Dict[str, np.ndarray]:
     if isinstance(dataset_like, dict):
         out = {}
@@ -252,13 +304,9 @@ def _sequence_dataset_mix_from_dataset_dict(dataset: Dict[str, np.ndarray], env_
 
 
 def _load_trajs_and_dataset(env_full_name: str) -> Tuple[List[Dict], Dict[str, np.ndarray], int]:
-    if DATA_BACKEND == "d4rl":
-        env = load_environment(env_full_name)
-        trajs, dataset = sequence_dataset_mix(env)
-        dataset = _dataset_like_to_dict(dataset)
-        return trajs, dataset, int(env.max_episode_steps)
-
-    if DATA_BACKEND == "just_d4rl":
+    def _load_via_just_d4rl() -> Tuple[List[Dict], Dict[str, np.ndarray], int]:
+        if not JUST_D4RL_BACKEND_AVAILABLE or d4rl_offline_dataset is None:
+            raise RuntimeError("just_d4rl backend is unavailable")
         attempts = max(1, int(DOWNLOAD_RETRIES))
         last_err = None
         for attempt in range(1, attempts + 1):
@@ -267,9 +315,9 @@ def _load_trajs_and_dataset(env_full_name: str) -> Tuple[List[Dict], Dict[str, n
                 break
             except Exception as e:
                 last_err = e
-                if e.__class__.__name__ == "ContentTooShortError" and attempt < attempts:
+                if _can_retry_download_error(e) and attempt < attempts:
                     print(
-                        f"[retry] partial download for {env_full_name} "
+                        f"[retry] partial/corrupt cache for {env_full_name} "
                         f"(attempt {attempt}/{attempts}); cleaning cache and retrying..."
                     )
                     _clear_partial_cache_files(env_full_name)
@@ -286,6 +334,24 @@ def _load_trajs_and_dataset(env_full_name: str) -> Tuple[List[Dict], Dict[str, n
         trajs, dataset = _sequence_dataset_mix_from_dataset_dict(dataset, env_full_name)
         return trajs, dataset, _max_episode_steps_for_env(env_full_name)
 
+    if DATA_BACKEND == "d4rl":
+        try:
+            env = load_environment(env_full_name)
+            trajs, dataset = sequence_dataset_mix(env)
+            dataset = _dataset_like_to_dict(dataset)
+            return trajs, dataset, int(env.max_episode_steps)
+        except Exception as e:
+            if JUST_D4RL_BACKEND_AVAILABLE:
+                print(
+                    "[fallback] d4rl backend failed; retrying with just_d4rl: "
+                    f"{type(e).__name__}: {e}"
+                )
+                return _load_via_just_d4rl()
+            raise
+
+    if DATA_BACKEND == "just_d4rl":
+        return _load_via_just_d4rl()
+
     raise RuntimeError(f"Unknown DATA_BACKEND={DATA_BACKEND}")
 
 
@@ -293,32 +359,45 @@ def calculate_vs_like_contradiff(dataset: Dict, max_path_length: int) -> List[fl
     """
     Keep behavior compatible with existing ContraDiff preprocessing.
     """
-    vs_discount = 1e-4 ** (1 / max_path_length)
-    vs_discounts = vs_discount ** np.arange(max_path_length)[:, None]
+    vs_discount = float(1e-4 ** (1 / max_path_length))
+    # NOTE: keep exact historical behavior from old preprocessing:
+    # old code used shape (H, 1) discounts and multiplied by shape (H,) rewards,
+    # which broadcasts to (H, H) before sum.
+    # So value == sum(discounts) * sum(rewards_window_with_padding).
+    discount_sum = float(np.sum(vs_discount ** np.arange(max_path_length)))
 
-    rewards_raw = np.asarray(dataset["rewards"]).reshape(-1).astype(np.float32)
-    terminals = np.asarray(dataset["terminals"]).reshape(-1)
-    n = rewards_raw.shape[0]
+    rewards_raw = np.asarray(dataset["rewards"], dtype=np.float64).reshape(-1)
+    terminals = np.asarray(dataset["terminals"]).reshape(-1).astype(bool)
+    n = int(rewards_raw.shape[0])
+    if n == 0:
+        return []
 
-    terminal_points = list(np.where(terminals)[0].astype(int))
     rewards = rewards_raw
     if not bool(terminals[-1]):
-        rewards = np.concatenate((rewards, np.zeros(max_path_length, dtype=np.float32)), axis=-1)
+        rewards = np.concatenate((rewards, np.zeros(max_path_length, dtype=np.float64)), axis=0)
+    prefix = np.concatenate(([0.0], np.cumsum(rewards, dtype=np.float64)), axis=0)
+
+    terminal_points = list(np.where(terminals)[0].astype(np.int64))
     terminal_points.append(n + max_path_length)
 
-    values: List[float] = []
-    for i in range(n):
-        if i > terminal_points[0]:
-            terminal_points = terminal_points[1:]
-        end = min(i + max_path_length, terminal_points[0])
-        rewards_si = rewards[i:end]
-        padding_length = max_path_length - len(rewards_si)
-        if padding_length > 0:
-            padding = np.ones(padding_length, dtype=np.float32) * -1
-            rewards_si = np.concatenate((rewards_si, padding), axis=-1)
-        value_si = np.sum(vs_discounts * rewards_si)
-        values.append(float(value_si))
-    return values
+    values = np.empty(n, dtype=np.float64)
+    seg_start = 0
+    for terminal_point in terminal_points:
+        seg_end = min(n - 1, int(terminal_point))
+        if seg_start > seg_end:
+            seg_start = int(terminal_point) + 1
+            continue
+
+        idx = np.arange(seg_start, seg_end + 1, dtype=np.int64)
+        end = np.minimum(idx + max_path_length, int(terminal_point))
+        sums = prefix[end] - prefix[idx]
+        padding = max_path_length - (end - idx)
+        values[idx] = discount_sum * (sums - padding)
+        seg_start = int(terminal_point) + 1
+        if seg_start >= n:
+            break
+
+    return values.astype(np.float32).tolist()
 
 
 def build_value_file(env_full_name: str, value_dir: Path, *, skip_existing: bool) -> Path:
@@ -532,8 +611,8 @@ def main() -> None:
     global DOWNLOAD_RETRIES, DOWNLOAD_RETRY_WAIT
     parser = argparse.ArgumentParser(description="One-click ContraDiff locomotion dataset preparation")
     parser.add_argument("--envs", type=str, default="halfcheetah,hopper,walker2d")
-    parser.add_argument("--datasets", type=str, default="expert,medium,medium-replay,random")
-    parser.add_argument("--mix-datasets", type=str, default="medium,medium-replay,random")
+    parser.add_argument("--datasets", type=str, default="expert,medium,medium-replay,medium-expert,random")
+    parser.add_argument("--mix-datasets", type=str, default="medium,medium-replay,medium-expert,random")
     parser.add_argument("--ratios", type=str, default="0.1,0.2,0.3")
     parser.add_argument("--metrics", type=str, default="canberra")
     parser.add_argument("--max-iter", type=int, default=100)
@@ -542,9 +621,10 @@ def main() -> None:
     parser.add_argument("--value-dir", type=str, default=str(MAIN_DIR / "value_of_states"))
     parser.add_argument("--download-retries", type=int, default=5)
     parser.add_argument("--download-retry-wait", type=int, default=5)
+    parser.add_argument("--backend", type=str, default="auto", choices=["auto", "d4rl", "just_d4rl"])
     parser.add_argument("--skip-existing", action="store_true")
     args = parser.parse_args()
-    _lazy_imports()
+    _lazy_imports(args.backend)
     DOWNLOAD_RETRIES = int(args.download_retries)
     DOWNLOAD_RETRY_WAIT = int(args.download_retry_wait)
 

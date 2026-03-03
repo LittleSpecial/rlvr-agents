@@ -14,12 +14,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
-SUBMIT_TRAIN_SCRIPT="${SUBMIT_TRAIN_SCRIPT:-${REPO_ROOT}/scripts/slurm/run_contradiff_ideaA_1gpu.sh}"
-SUBMIT_VALUE_SCRIPT="${SUBMIT_VALUE_SCRIPT:-${REPO_ROOT}/scripts/slurm/run_contradiff_value_1gpu.sh}"
+SUBMIT_TRAIN_SCRIPT="${SUBMIT_TRAIN_SCRIPT:-${REPO_ROOT}/scripts/slurm/run_contradiff_ideaA_4gpu.sh}"
+SUBMIT_CACDP_SCRIPT="${SUBMIT_CACDP_SCRIPT:-${REPO_ROOT}/scripts/slurm/run_contradiff_cacdp_4gpu.sh}"
+SUBMIT_VALUE_SCRIPT="${SUBMIT_VALUE_SCRIPT:-${REPO_ROOT}/scripts/slurm/run_contradiff_value_4gpu.sh}"
 SUBMIT_EVAL_SCRIPT="${SUBMIT_EVAL_SCRIPT:-${REPO_ROOT}/scripts/slurm/run_contradiff_eval_1gpu.sh}"
-if [ ! -f "${SUBMIT_TRAIN_SCRIPT}" ] || [ ! -f "${SUBMIT_VALUE_SCRIPT}" ] || [ ! -f "${SUBMIT_EVAL_SCRIPT}" ]; then
+if [ ! -f "${SUBMIT_TRAIN_SCRIPT}" ] || [ ! -f "${SUBMIT_CACDP_SCRIPT}" ] || [ ! -f "${SUBMIT_VALUE_SCRIPT}" ] || [ ! -f "${SUBMIT_EVAL_SCRIPT}" ]; then
   echo "[ERR] Missing submit scripts." >&2
   echo "train=${SUBMIT_TRAIN_SCRIPT}" >&2
+  echo "cacdp=${SUBMIT_CACDP_SCRIPT}" >&2
   echo "value=${SUBMIT_VALUE_SCRIPT}" >&2
   echo "eval=${SUBMIT_EVAL_SCRIPT}" >&2
   exit 2
@@ -43,7 +45,7 @@ COUNTERFACTUAL_K="${COUNTERFACTUAL_K:-8}"
 BRANCH="${BRANCH:-plan2_hard}"
 N_DIFFUSION_STEPS="${N_DIFFUSION_STEPS:-20}"
 HORIZON="${HORIZON:-32}"
-NUMS_EVAL="${NUMS_EVAL:-50}"
+NUMS_EVAL="${NUMS_EVAL:-20}"
 VALUE_BRANCH="${VALUE_BRANCH:-plan1_diffuser}"
 VALUESEED="${VALUESEED:-1000}"
 VALUE_STEPS="${VALUE_STEPS:-200000}"
@@ -59,6 +61,16 @@ CONTRADIFF_DIR="${CONTRADIFF_DIR:-${REPO_ROOT}/contradiff}"
 CONDA_ENV="${CONDA_ENV:-$HOME/.conda/envs/rlvr}"
 PYTHON_BIN="${PYTHON_BIN:-${CONDA_ENV}/bin/python3}"
 LOGBASE_ROOT="${LOGBASE_ROOT:-${CONTRADIFF_DIR}/main/logs_runs}"
+
+# CACDP params
+ENABLE_CACDP_TRACK="${ENABLE_CACDP_TRACK:-1}"
+CACDP_BRANCH="${CACDP_BRANCH:-plan9b_cacdp}"
+CACDP_USE_CRITICALITY_PREDICTOR="${CACDP_USE_CRITICALITY_PREDICTOR:-1}"
+CACDP_CRITICALITY_HIDDEN_DIM="${CACDP_CRITICALITY_HIDDEN_DIM:-128}"
+CACDP_CRITICALITY_LOSS_WEIGHT="${CACDP_CRITICALITY_LOSS_WEIGHT:-0.1}"
+CACDP_ACTION_CONTRASTIVE_WEIGHT="${CACDP_ACTION_CONTRASTIVE_WEIGHT:-0.5}"
+CACDP_ACTION_EMBD_DIM="${CACDP_ACTION_EMBD_DIM:-64}"
+CACDP_GUIDANCE_SCALE_BOOST="${CACDP_GUIDANCE_SCALE_BOOST:-1.0}"
 
 submit_and_get_id() {
   if [ "${DRY_RUN}" = "1" ]; then
@@ -86,6 +98,14 @@ submit_track() {
   local conda_env="$7"
   local python_bin="$8"
   local name_prefix="$9"
+  local train_script="${10:-${SUBMIT_TRAIN_SCRIPT}}"
+  local branch="${11:-${BRANCH}}"
+  local use_criticality_predictor="${12:-0}"
+  local criticality_hidden_dim="${13:-128}"
+  local criticality_loss_weight="${14:-0.1}"
+  local action_contrastive_weight="${15:-0.5}"
+  local action_embd_dim="${16:-64}"
+  local guidance_scale_boost="${17:-1.0}"
 
   local exp_name="${name_prefix}_${track}_${DATASET//-/_}_${timestamp}_$RANDOM"
   local run_logbase="${LOGBASE_ROOT}/${exp_name}"
@@ -94,12 +114,15 @@ submit_track() {
   submit_and_get_id env \
     CUDA_MODULE="${CUDA_MODULE}" GCC_MODULE="${GCC_MODULE}" NCCL_MODULE="${NCCL_MODULE}" CUDNN_MODULE="${CUDNN_MODULE}" \
     CONDA_ENV="${conda_env}" PYTHON_BIN="${python_bin}" CONTRADIFF_DIR="${CONTRADIFF_DIR}" \
-    EXPERIMENT_NAME="${exp_name}" RUN_LOGBASE="${run_logbase}" BRANCH="${BRANCH}" DATASET="${DATASET}" EXP_DATASET="${EXP_DATASET}" EXPERT_RATIO="${EXPERT_RATIO}" \
+    EXPERIMENT_NAME="${exp_name}" RUN_LOGBASE="${run_logbase}" BRANCH="${branch}" DATASET="${DATASET}" EXP_DATASET="${EXP_DATASET}" EXPERT_RATIO="${EXPERT_RATIO}" \
     USE_JUST_D4RL_BACKEND="${use_just_d4rl}" RENDERER="utils.NullRenderer" \
     USE_COUNTERFACTUAL_CREDIT="${use_counterfactual}" COUNTERFACTUAL_K="${COUNTERFACTUAL_K}" \
+    USE_CRITICALITY_PREDICTOR="${use_criticality_predictor}" CRITICALITY_HIDDEN_DIM="${criticality_hidden_dim}" \
+    CRITICALITY_LOSS_WEIGHT="${criticality_loss_weight}" ACTION_CONTRASTIVE_WEIGHT="${action_contrastive_weight}" \
+    ACTION_EMBD_DIM="${action_embd_dim}" GUIDANCE_SCALE_BOOST="${guidance_scale_boost}" \
     MAX_STEPS="${MAX_STEPS}" LOG_INTERVAL="${LOG_INTERVAL}" EVAL_INTERVAL="${EVAL_INTERVAL}" SAVE_INTERVAL="${SAVE_INTERVAL}" \
     LEARNING_RATE="${LEARNING_RATE}" BATCH_SIZE="${BATCH_SIZE}" HORIZON="${HORIZON}" N_DIFFUSION_STEPS="${N_DIFFUSION_STEPS}" \
-    sbatch "${SUBMIT_TRAIN_SCRIPT}"
+    sbatch "${train_script}"
   train_job="${SUBMITTED_JOB_ID:-}"
   if [ -z "${train_job}" ]; then
     echo "[ERR] failed to submit training job for ${exp_name}" >&2
@@ -123,7 +146,8 @@ submit_track() {
   submit_and_get_id env \
     CUDA_MODULE="${CUDA_MODULE}" GCC_MODULE="${GCC_MODULE}" NCCL_MODULE="${NCCL_MODULE}" CUDNN_MODULE="${CUDNN_MODULE}" \
     CONDA_ENV="${conda_env}" PYTHON_BIN="${python_bin}" CONTRADIFF_DIR="${CONTRADIFF_DIR}" \
-    EXPERIMENT_NAME="${exp_name}" RUN_LOGBASE="${run_logbase}" VALBASE="${run_logbase}" BRANCH="${BRANCH}" DATASET="${DATASET}" EXP_DATASET="${EXP_DATASET}" EXPERT_RATIO="${EXPERT_RATIO}" \
+    EXPERIMENT_NAME="${exp_name}" RUN_LOGBASE="${run_logbase}" VALBASE="${run_logbase}" BRANCH="${branch}" DATASET="${DATASET}" EXP_DATASET="${EXP_DATASET}" EXPERT_RATIO="${EXPERT_RATIO}" \
+    USE_CRITICALITY_PREDICTOR="${use_criticality_predictor}" GUIDANCE_SCALE_BOOST="${guidance_scale_boost}" \
     NUMS_EVAL="${NUMS_EVAL}" LOAD_ITER="-1" STRICT_REAL_EVAL="${strict_real_eval}" ALLOW_VALUE_FALLBACK="${allow_value_fallback}" EVAL_BACKEND="${eval_backend}" VALUESEED="${VALUESEED}" \
     HORIZON="${HORIZON}" N_DIFFUSION_STEPS="${N_DIFFUSION_STEPS}" \
     sbatch --dependency=afterok:"${value_job}" "${SUBMIT_EVAL_SCRIPT}"
@@ -141,6 +165,13 @@ if [ "${ENABLE_TRACK_A}" = "1" ]; then
   echo "=== Track A: aarch64-compatible (proxy eval) ==="
   submit_track "base" 0 1 0 0 "auto" "${CONDA_ENV}" "${PYTHON_BIN}" "trackA"
   submit_track "idea" 1 1 0 0 "auto" "${CONDA_ENV}" "${PYTHON_BIN}" "trackA"
+  if [ "${ENABLE_CACDP_TRACK}" = "1" ]; then
+    submit_track "cacdp" 0 1 0 0 "auto" "${CONDA_ENV}" "${PYTHON_BIN}" "trackA" \
+      "${SUBMIT_CACDP_SCRIPT}" "${CACDP_BRANCH}" \
+      "${CACDP_USE_CRITICALITY_PREDICTOR}" "${CACDP_CRITICALITY_HIDDEN_DIM}" \
+      "${CACDP_CRITICALITY_LOSS_WEIGHT}" "${CACDP_ACTION_CONTRASTIVE_WEIGHT}" \
+      "${CACDP_ACTION_EMBD_DIM}" "${CACDP_GUIDANCE_SCALE_BOOST}"
+  fi
 else
   echo "[INFO] Track A disabled (ENABLE_TRACK_A=${ENABLE_TRACK_A})."
 fi
@@ -163,6 +194,13 @@ if [ "${ENABLE_TRACK_B}" = "1" ]; then
   echo "=== Track B: gymnasium+mujoco online protocol ==="
   submit_track "base" 0 "${TRACK_B_USE_JUST_D4RL}" "${TRACK_B_STRICT_REAL_EVAL}" "${TRACK_B_ALLOW_VALUE_FALLBACK}" "${TRACK_B_EVAL_BACKEND}" "${TRACK_B_CONDA_ENV}" "${TRACK_B_PYTHON_BIN}" "trackB"
   submit_track "idea" 1 "${TRACK_B_USE_JUST_D4RL}" "${TRACK_B_STRICT_REAL_EVAL}" "${TRACK_B_ALLOW_VALUE_FALLBACK}" "${TRACK_B_EVAL_BACKEND}" "${TRACK_B_CONDA_ENV}" "${TRACK_B_PYTHON_BIN}" "trackB"
+  if [ "${ENABLE_CACDP_TRACK}" = "1" ]; then
+    submit_track "cacdp" 0 "${TRACK_B_USE_JUST_D4RL}" "${TRACK_B_STRICT_REAL_EVAL}" "${TRACK_B_ALLOW_VALUE_FALLBACK}" "${TRACK_B_EVAL_BACKEND}" "${TRACK_B_CONDA_ENV}" "${TRACK_B_PYTHON_BIN}" "trackB" \
+      "${SUBMIT_CACDP_SCRIPT}" "${CACDP_BRANCH}" \
+      "${CACDP_USE_CRITICALITY_PREDICTOR}" "${CACDP_CRITICALITY_HIDDEN_DIM}" \
+      "${CACDP_CRITICALITY_LOSS_WEIGHT}" "${CACDP_ACTION_CONTRASTIVE_WEIGHT}" \
+      "${CACDP_ACTION_EMBD_DIM}" "${CACDP_GUIDANCE_SCALE_BOOST}"
+  fi
 else
   echo "[INFO] Track B disabled (ENABLE_TRACK_B=${ENABLE_TRACK_B})."
 fi

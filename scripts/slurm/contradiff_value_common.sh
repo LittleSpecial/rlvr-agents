@@ -135,6 +135,29 @@ VALUE_BATCH_SIZE="${VALUE_BATCH_SIZE:-32}"
 VALUE_RENDERER="${VALUE_RENDERER:-utils.NullRenderer}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-}"
+NUM_GPUS="${NUM_GPUS:-${SLURM_GPUS_ON_NODE:-${DEFAULT_NUM_GPUS:-1}}}"
+if ! [[ "${NUM_GPUS}" =~ ^[0-9]+$ ]]; then
+  NUM_GPUS="$(echo "${NUM_GPUS}" | grep -oE '[0-9]+' | head -n1)"
+fi
+if ! [[ "${NUM_GPUS}" =~ ^[0-9]+$ ]] || [ "${NUM_GPUS}" -lt 1 ]; then
+  echo "[ERR] Invalid NUM_GPUS=${NUM_GPUS}" >&2
+  exit 2
+fi
+USE_DDP="${USE_DDP:-${USE_DATAPARALLEL:-1}}"
+DDP_SPLIT_BATCH="${DDP_SPLIT_BATCH:-1}"
+export NUM_GPUS
+export USE_DDP
+export DDP_SPLIT_BATCH
+if [ "${NUM_GPUS}" -gt 1 ]; then
+  if [ "${USE_DDP}" = "1" ]; then
+    echo "[INFO] Multi-GPU enabled via torch.distributed (DDP), NUM_GPUS=${NUM_GPUS}."
+    if [ "${VALUE_BATCH_SIZE}" -lt "${NUM_GPUS}" ]; then
+      echo "[WARN] VALUE_BATCH_SIZE=${VALUE_BATCH_SIZE} < NUM_GPUS=${NUM_GPUS}; some GPUs may be under-utilized."
+    fi
+  else
+    echo "[WARN] USE_DDP=${USE_DDP}; job will run single-process on DEVICE=${DEVICE}."
+  fi
+fi
 
 LOGBASE_ROOT="${LOGBASE_ROOT:-${CONTRADIFF_DIR}/main/logs_runs}"
 if [ -z "${RUN_LOGBASE:-}" ]; then
@@ -156,6 +179,7 @@ echo "VALUE_BRANCH=${VALUE_BRANCH} DATASET=${DATASET}"
 echo "EXP_DATASET=${EXP_DATASET} EXPERT_RATIO=${EXPERT_RATIO}"
 echo "HORIZON=${HORIZON} N_DIFFUSION_STEPS=${N_DIFFUSION_STEPS}"
 echo "SEED=${SEED} DEVICE=${DEVICE}"
+echo "NUM_GPUS=${NUM_GPUS} USE_DDP=${USE_DDP} DDP_SPLIT_BATCH=${DDP_SPLIT_BATCH}"
 echo "VALUE_STEPS=${VALUE_STEPS} LOG_INTERVAL=${LOG_INTERVAL} SAVE_INTERVAL=${SAVE_INTERVAL}"
 echo "LEARNING_RATE=${LEARNING_RATE} VALUE_BATCH_SIZE=${VALUE_BATCH_SIZE}"
 echo "VALUE_RENDERER=${VALUE_RENDERER}"
@@ -191,6 +215,10 @@ if [ -n "${EXTRA_ARGS}" ]; then
   PY_ARGS+=(${EXTRA_ARGS})
 fi
 
-"${PYTHON_BIN}" -u "${PY_ARGS[@]}"
+if [ "${NUM_GPUS}" -gt 1 ] && [ "${USE_DDP}" = "1" ]; then
+  "${PYTHON_BIN}" -u -m torch.distributed.run --standalone --nproc_per_node="${NUM_GPUS}" "${PY_ARGS[@]}"
+else
+  "${PYTHON_BIN}" -u "${PY_ARGS[@]}"
+fi
 
 echo "=== ContraDiff value training done ==="
